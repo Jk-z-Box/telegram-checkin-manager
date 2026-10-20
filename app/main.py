@@ -55,9 +55,13 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
     async def security(request, call_next):
         if request.method in ("POST", "PUT", "PATCH", "DELETE"):
             origin = request.headers.get("origin")
-            expected = str(request.base_url).rstrip("/")
+            # A configured browser origin also works when a remote proxy changes
+            # Host, scheme or port. Do not trust client-supplied forwarded headers.
+            expected = (request.app.state.store.config().get("public_url") or
+                        str(request.base_url).rstrip("/"))
             if origin and origin != expected:
-                return JSONResponse({"detail": "请求来源不匹配"}, status_code=403)
+                return JSONResponse({"detail": "请求来源不匹配；通过域名访问时，请在服务器用 "
+                                     "tgc domain 设置浏览器访问地址"}, status_code=403)
             try:
                 if int(request.headers.get("content-length", "0")) > 32768:
                     return JSONResponse({"detail": "请求过大"}, status_code=413)

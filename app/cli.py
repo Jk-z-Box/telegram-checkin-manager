@@ -9,7 +9,7 @@ import time
 from .models import Job, next_time
 from .store import PASSWORDS, Store, data_dir, initialize, save_config
 from .configuration import (access_summary, ask, ask_password, validate_host,
-                            validate_port, validate_username, wizard)
+                            validate_port, validate_public_url, validate_username, wizard)
 
 
 def main():
@@ -20,6 +20,8 @@ def main():
     sub.add_parser("reset-password", aliases=["passwd"])
     sub.add_parser("config", aliases=["setup"])
     sub.add_parser("access")
+    domain = sub.add_parser("domain", help="设置浏览器访问地址；off 恢复自动来源校验")
+    domain.add_argument("url", nargs="?", type=validate_public_url)
     port = sub.add_parser("port", help="修改 Web 端口")
     port.add_argument("port", type=validate_port)
     bind = sub.add_parser("bind", help="指定监听 IP，可附带端口")
@@ -76,7 +78,7 @@ def main():
                        ("1" if args.cmd == "pause" else "0",))
             print("已暂停后续任务（已发出的消息无法撤回）" if args.cmd == "pause" else "已恢复调度")
         elif args.cmd in ("config", "setup", "port", "public", "local", "bind",
-                          "username", "enable", "disable"):
+                          "username", "enable", "disable", "domain"):
             original = db.config()
             config = original.copy()
             password = None
@@ -94,6 +96,10 @@ def main():
                     config["port"] = args.port
             elif args.cmd == "username":
                 config["username"] = args.username or ask("管理员用户名", config["username"], validate_username)
+            elif args.cmd == "domain":
+                config["public_url"] = (args.url if args.url is not None else
+                                       ask("浏览器访问地址（off 不设置）",
+                                           config.get("public_url") or "off", validate_public_url))
             else:
                 config["autostart"] = args.cmd == "enable"
             if password:
@@ -115,6 +121,7 @@ def main():
                 "username": db.config()["username"],
                 "secure_cookie": db.config()["secure_cookie"],
                 "autostart": db.config().get("autostart", True),
+                "public_url": db.config().get("public_url", ""),
             }, ensure_ascii=False, indent=2))
         elif args.cmd == "list-jobs":
             for job in db.all("SELECT id,name,account_id,cron,timezone,enabled FROM jobs"):
@@ -169,6 +176,7 @@ def menu():
         ("开启开机自启", "enable"),
         ("关闭开机自启", "disable"),
         ("查看访问地址", "access"),
+        ("设置访问域名 / Cloudflare 地址", "domain"),
     ]
     allowed = {command for _, command in labels} | {"bind", "setup", "reset-password", "help"}
     while True:

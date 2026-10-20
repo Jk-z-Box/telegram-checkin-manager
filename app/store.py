@@ -8,7 +8,7 @@ from pathlib import Path
 from argon2 import PasswordHasher
 from cryptography.fernet import Fernet
 
-from .configuration import validate_host, validate_port, validate_username
+from .configuration import validate_host, validate_port, validate_public_url, validate_username
 
 PASSWORDS = PasswordHasher()
 
@@ -28,11 +28,12 @@ def save_config(path, config):
 
 
 def initialize(path, username, password, *, host="127.0.0.1", port=8080,
-               secure_cookie=False, autostart=True):
+               secure_cookie=False, autostart=True, public_url=""):
     if not 12 <= len(password) <= 256:
         raise ValueError("管理员密码长度必须为 12–256 字符")
     username = validate_username(username)
     host, port = validate_host(host), validate_port(port)
+    public_url = validate_public_url(public_url)
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if (path / "config.json").exists():
         raise ValueError("已经初始化，请使用 reset-password 修改密码")
@@ -48,6 +49,7 @@ def initialize(path, username, password, *, host="127.0.0.1", port=8080,
         "port": port,
         "secure_cookie": bool(secure_cookie),
         "autostart": bool(autostart),
+        "public_url": public_url,
     })
     Store(path).close()
 

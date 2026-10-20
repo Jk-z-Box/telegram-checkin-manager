@@ -15,6 +15,8 @@ Telegram 签到管理 · tgc 与 tgcheckin 等效
   tgc local [端口]        仅监听 127.0.0.1
   tgc bind IP [端口]      监听指定 IPv4 / IPv6 地址
   tgc port 端口           修改 Web 端口（1–65535）
+  tgc domain [完整网址]   设置浏览器访问地址，例如 https://checkin.example.com
+  tgc domain off          恢复自动来源校验
   tgc username [用户名]   修改管理员用户名
   tgc passwd              交互修改密码（不通过命令参数传递密码）
   tgc enable|disable      开启 / 关闭开机自启
@@ -28,7 +30,7 @@ Telegram 签到管理 · tgc 与 tgcheckin 等效
   tgc update              从 GitHub 获取最新安装器并更新
 
 非 root 用户执行管理操作时会自动使用 sudo。
-config/setup/public/local/bind/port 会应用配置并重启正在运行的服务；
+config/setup/public/local/bind/port/domain 会应用配置并重启正在运行的服务；
 已停止的服务保持停止，开机自启设置单独生效。
 HELP
     exit 0 ;;
@@ -62,7 +64,7 @@ case "${1:-menu}" in
     install -d -m 700 -o tgcheckin -g tgcheckin /var/backups/tgcheckin
     exec runuser -u tgcheckin -- "$ROOT/venv/bin/python" -m app.backup /var/backups/tgcheckin ;;
   menu) exec "$ROOT/venv/bin/python" -m app.cli menu ;;
-  config|setup|public|local|bind|port)
+  config|setup|public|local|bind|port|domain)
     app_cli "$@"
     apply_autostart
     if systemctl is-active --quiet tgcheckin; then

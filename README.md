@@ -31,9 +31,10 @@ curl -fsSL https://raw.githubusercontent.com/Jk-z-Box/telegram-checkin-manager/m
 
 1. **监听方式**：仅本机 `127.0.0.1`、公网/局域网 `0.0.0.0`，或者自定义 IPv4/IPv6 地址。
 2. **Web 端口**：可自定义 `1–65535`，默认 `8080`。安装的 systemd 服务允许非 root 服务帐号绑定低端口。
-3. **HTTPS Cookie**：是否只允许经 HTTPS 登录，默认关闭；开启前需要自行配置 HTTPS 反向代理。
-4. **开机自启**：默认开启。关闭后仍会启动本次安装的服务，只是不随下次系统启动。
-5. **管理员用户名和密码**：用户名默认 `admin`，密码至少 12 字符、不回显、没有预置密码。
+3. **浏览器访问地址**：经 Cloudflare 或反向代理访问时，填写完整地址，例如 `https://checkin.example.com`；直接访问服务器 IP 可保留 `off`。
+4. **HTTPS Cookie**：是否只允许浏览器经 HTTPS 登录，默认关闭；开启前需要确保 HTTPS 域名可以访问。
+5. **开机自启**：默认开启。关闭后仍会启动本次安装的服务，只是不随下次系统启动。
+6. **管理员用户名和密码**：用户名默认 `admin`，密码至少 12 字符、不回显、没有预置密码。
 
 直接回车采用方括号内的默认值，输入无效时会提示重新填写。所有配置填写完成后才保存。安装器通过 `/dev/tty` 读取交互输入，因此支持上面的 `curl | sudo bash`，首次初始化需要真实终端。
 
@@ -70,7 +71,27 @@ ssh -N -L 8080:127.0.0.1:8080 用户名@服务器IP
 3. 运行 `tgc config`，把「仅允许通过 HTTPS 登录」设为 `y`，其他选项按需填写或回车保留。正在运行的服务会自动重启应用配置。
 4. 打开自己的 HTTPS 域名登录。
 
-启用 Secure Cookie 后不能再通过普通 HTTP 登录。反向代理必须保留原始 Host，并传递正确的 `X-Forwarded-Proto`；只信任来自本机的代理头。默认 Caddy 反向代理满足这一配置。
+启用 Secure Cookie 后不能再通过普通 HTTP 登录。未指定浏览器访问地址时，反向代理必须保留原始 Host，并传递正确的 `X-Forwarded-Proto`；只信任来自本机的代理头。默认 Caddy 反向代理满足这一配置。也可用 `tgc domain https://checkin.example.com` 显式指定浏览器访问地址。
+
+### Cloudflare Origin Rules / 域名提示「请求来源不匹配」
+
+旧版直接比较浏览器的 Origin 与后端识别到的地址。Cloudflare 回源的协议、Host 或端口与浏览器访问地址不同，就可能被拒绝；单独打开 HTTPS Cookie 不能解决来源不匹配。
+
+从 `v1.1.2` 开始，可指定唯一的浏览器访问地址：
+
+```bash
+tgc update
+tgc domain https://checkin.example.com
+tgc access
+```
+
+将示例替换为浏览器地址栏里的协议、域名和非默认端口；不要填回源 IP、回源端口或路径。例如浏览器使用默认 HTTPS 端口、Origin Rules 回源到服务器 `9090`，这里仍填写 `https://checkin.example.com`，不加 `:9090`。配置保存后会重启正在运行的服务，刷新网页即可重新登录。
+
+该配置保留严格来源校验和 CSRF 验证，不信任任意代理头，也不需要把 Cloudflare 所有出口 IP 设为可信代理。设置后，其他域名及直接 IP 地址的浏览器写入请求会被拒绝。运行 `tgc domain off` 可恢复默认的同源判断。旧配置无需迁移，更新时会保留现有数据和设置。
+
+域名配置只用于来源校验，不修改 DNS、监听地址、监听端口或 TLS。Cloudflare 直接回源时，服务须监听可达的服务器地址，Origin Rules 的目标端口须对应实际端口。Cloudflare 与源站之间的 HTTPS 需要源站 TLS 终止代理；应用自身提供 HTTP。也可使用 Cloudflare Tunnel。不要仅为消除此提示而关闭来源校验。
+
+参考：[Cloudflare Origin Rules 设置](https://developers.cloudflare.com/rules/origin-rules/features/)、[Cloudflare Full (strict)](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/)。
 
 ## 设置签到
 
@@ -138,6 +159,8 @@ tgc local 8080             # 仅监听本机，端口 8080
 tgc public                 # 切换到公网/局域网，保留当前端口
 tgc bind ::1 8080          # 指定 IPv6 地址和端口
 tgc port 8088              # 只修改端口
+tgc domain https://checkin.example.com  # 设置浏览器访问地址，适配 Cloudflare/反向代理
+tgc domain off             # 恢复默认的同源判断
 tgc username myadmin       # 修改用户名，清除所有 Web 登录
 tgc passwd                 # 交互修改密码，清除所有 Web 登录
 tgc enable                 # 开启开机自启
@@ -154,7 +177,7 @@ tgc update                 # 备份后更新，启动失败自动回滚代码
 
 `tgc` 与 `tgcheckin` 完全等效。菜单既支持数字选择，也支持直接输入指令，例如 `port 9090`、`public 9090`、`restart`；输入 `q` 或 `0` 退出。
 
-`config/setup/public/local/bind/port` 保存后会应用开机自启配置，并重启**正在运行**的服务；若服务已停止，则保持停止，稍后用 `tgc start` 启动。更改绑定地址或端口后，需要使用新地址访问 Web。`enable/disable` 只改变开机自启状态，`pause/resume` 只改变签到调度，不停止 Web。
+`config/setup/public/local/bind/port/domain` 保存后会应用开机自启配置，并重启**正在运行**的服务；若服务已停止，则保持停止，稍后用 `tgc start` 启动。更改绑定地址或端口后，需要使用新地址访问 Web。`enable/disable` 只改变开机自启状态，`pause/resume` 只改变签到调度，不停止 Web。
 
 `config` 向导修改已有配置时，回车保留当前值；新密码留空也会保留原密码。`passwd` 和 `username` 可单独修改凭据，无需重启服务。密码只通过不回显的交互提示输入，不支持明文密码命令行参数。
 

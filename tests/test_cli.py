@@ -53,7 +53,7 @@ def test_init_defaults_and_password_hash(monkeypatch, tmp_path, capsys):
 
 def test_init_public_retries_invalid_values(monkeypatch, tmp_path, capsys):
     invoke(monkeypatch, tmp_path, "init",
-           answers=["invalid", "2", "0", "65536", "9090", "invalid", "n", "n", "bad name", "owner"],
+           answers=["invalid", "2", "0", "65536", "9090", "off", "invalid", "n", "n", "bad name", "owner"],
            passwords=["short", PASSWORD, "mismatch", PASSWORD, PASSWORD])
     saved = config(tmp_path)
     assert (saved["host"], saved["port"], saved["username"]) == ("0.0.0.0", 9090, "owner")
@@ -65,7 +65,7 @@ def test_init_public_retries_invalid_values(monkeypatch, tmp_path, capsys):
 
 def test_init_ipv6_https(monkeypatch, tmp_path, capsys):
     invoke(monkeypatch, tmp_path, "init",
-           answers=["3", "::", "8443", "y", "y", "owner"], passwords=[PASSWORD, PASSWORD])
+           answers=["3", "::", "8443", "off", "y", "y", "owner"], passwords=[PASSWORD, PASSWORD])
     saved = config(tmp_path)
     assert saved["host"] == "::" and saved["port"] == 8443 and saved["secure_cookie"]
     output = capsys.readouterr().out
@@ -92,6 +92,7 @@ def test_reconfigure_preserves_credentials_data_and_sessions(monkeypatch, tmp_pa
     (["port", "80"], {"host": "127.0.0.1", "port": 80}),
     (["disable"], {"autostart": False}),
     (["enable"], {"autostart": True}),
+    (["domain", "https://checkin.example.com/"], {"public_url": "https://checkin.example.com"}),
 ])
 def test_configuration_shortcuts(monkeypatch, tmp_path, args, expected):
     initialize(tmp_path, "owner", PASSWORD)
@@ -126,7 +127,7 @@ def test_setup_changes_credentials_and_network_together(monkeypatch, tmp_path):
     initialize(tmp_path, "owner", PASSWORD)
     add_session(tmp_path)
     invoke(monkeypatch, tmp_path, "setup",
-           answers=["2", "9000", "n", "n", "new-admin"],
+           answers=["2", "9000", "off", "n", "n", "new-admin"],
            passwords=["another-test-password", "another-test-password"])
     saved = config(tmp_path)
     assert saved["username"] == "new-admin" and saved["host"] == "0.0.0.0"
@@ -213,6 +214,30 @@ def test_wrapper_invalid_config_never_calls_systemctl(wrapper):
     result = subprocess.run(["bash", str(entry), "port", "0"], env=env, text=True, capture_output=True)
     assert result.returncode != 0 and not log.exists() and config(data) == before
     assert "argument port" in result.stderr
+
+
+def test_domain_wrapper_saves_url_restarts_and_can_clear(wrapper):
+    entry, data, log, env = wrapper
+    original = config(data)
+    for value, expected in [("https://checkin.example.com/", "https://checkin.example.com"), ("off", "")]:
+        result = subprocess.run(["bash", str(entry), "domain", value], env=env, text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+        saved = config(data)
+        assert saved["public_url"] == expected
+        assert saved["host"] == original["host"] and saved["port"] == original["port"]
+        assert saved["password_hash"] == original["password_hash"]
+    assert log.read_text().splitlines().count("restart tgcheckin") == 2
+
+
+def test_wizard_sets_public_url_and_retains_it(monkeypatch, tmp_path, capsys):
+    invoke(monkeypatch, tmp_path, "init",
+           answers=["2", "9000", "invalid", "https://CHECKIN.example.com:443/", "y", "y", "owner"],
+           passwords=[PASSWORD, PASSWORD])
+    saved = config(tmp_path)
+    assert saved["public_url"] == "https://checkin.example.com" and saved["secure_cookie"]
+    assert "Web 地址：https://checkin.example.com" in capsys.readouterr().out
+    invoke(monkeypatch, tmp_path, "config", answers=[""] * 6, passwords=[""])
+    assert config(tmp_path) == saved
 
 
 def test_wrapper_boot_setting_does_not_restart(wrapper):

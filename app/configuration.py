@@ -1,6 +1,8 @@
 """Shared validation and interactive deployment configuration."""
 import getpass
 import ipaddress
+import re
+from urllib.parse import urlsplit
 
 
 def validate_host(value):
@@ -28,6 +30,40 @@ def validate_username(value):
     if not 1 <= len(value) <= 64 or any(c.isspace() or not c.isprintable() for c in value):
         raise ValueError("用户名须为 1–64 个可见字符，不能包含空白")
     return value
+
+
+def validate_public_url(value):
+    """One explicit browser origin; never derive it from untrusted proxy headers."""
+    value = value.strip()
+    if not value or value.lower() == "off":
+        return ""
+    message = "请输入完整的 http:// 或 https:// 访问地址，不带路径、参数或帐号；off 表示不设置"
+    try:
+        if len(value) > 2048 or any(c.isspace() or not c.isprintable() for c in value):
+            raise ValueError(message)
+        url = urlsplit(value)
+        if (url.scheme not in ("http", "https") or not url.hostname or
+                url.username is not None or url.password is not None or
+                url.path not in ("", "/") or "?" in value or "#" in value or
+                "\\" in value or "%" in url.netloc):
+            raise ValueError(message)
+        host = url.hostname.encode("idna").decode("ascii").lower()
+        try:
+            address = ipaddress.ip_address(host)
+            host = f"[{address}]" if address.version == 6 else str(address)
+        except ValueError:
+            labels = host.rstrip(".").split(".")
+            if len(host) > 253 or any(
+                    not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                    for label in labels):
+                raise ValueError(message)
+        port = url.port
+        if port is not None:
+            validate_port(port)
+        suffix = f":{port}" if port is not None and port != {"http": 80, "https": 443}[url.scheme] else ""
+        return f"{url.scheme}://{host}{suffix}"
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError(message) from exc
 
 
 def ask(prompt, default, validator=lambda value: value):
@@ -81,13 +117,15 @@ def wizard(current=None):
     if selected == "3":
         host = ask("监听 IP", host, validate_host)
     port = ask("Web 端口", current.get("port", 8080), validate_port)
-    print("HTTPS Cookie 需要已配置 HTTPS 反向代理；应用本身提供 HTTP。")
+    public_url = ask("浏览器访问地址（Cloudflare/反向代理域名，off 不设置）",
+                     current.get("public_url") or "off", validate_public_url)
+    print("HTTPS Cookie 需要浏览器经 HTTPS 域名访问；应用本身提供 HTTP。")
     secure = yes_no("仅允许通过 HTTPS 登录", current.get("secure_cookie", False))
     autostart = yes_no("服务开机自启", current.get("autostart", True))
     username = ask("管理员用户名", current.get("username", "admin"), validate_username)
     password = ask_password(optional=bool(current))
     return {"host": host, "port": port, "secure_cookie": secure,
-            "autostart": autostart, "username": username}, password
+            "autostart": autostart, "username": username, "public_url": public_url}, password
 
 
 def access_summary(config):
@@ -95,7 +133,10 @@ def access_summary(config):
     address = ipaddress.ip_address(host)
     print(f"监听地址：{host}    端口：{port}")
     print(f"管理员：{config['username']}    开机自启：{'是' if config.get('autostart', True) else '否'}")
-    if config["secure_cookie"]:
+    if config.get("public_url"):
+        print(f"Web 地址：{config['public_url']}")
+        print("来源校验以此地址为准；回源监听地址和端口保持独立。")
+    elif config["secure_cookie"]:
         print("访问方式：打开已配置的 HTTPS 反向代理域名；普通 HTTP 无法登录。")
     else:
         if address.is_unspecified:
