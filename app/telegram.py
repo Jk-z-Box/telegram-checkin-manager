@@ -47,6 +47,22 @@ def sent_message_id(result, random_id):
     return None
 
 
+def dialog_summary(dialog):
+    entity = dialog.entity
+    if isinstance(entity, types.User):
+        kind = "bot" if entity.bot else "user"
+    elif isinstance(entity, (types.Chat, types.ChatForbidden)):
+        kind = "group"
+    elif isinstance(entity, (types.Channel, types.ChannelForbidden)):
+        kind = "supergroup" if entity.megagroup or getattr(entity, "gigagroup", False) else "channel"
+    else:
+        kind = "other"
+    # Identity comes from Telegram's entity type, never from a title containing "bot".
+    # Access hashes belong to the account and are not exposed to the browser.
+    return {"id": str(dialog.id), "name": dialog.name or str(dialog.id),
+            "kind": kind, "username": getattr(entity, "username", None)}
+
+
 class LoginFailure(CheckinError):
     """A credential-free diagnostic suitable for the Web UI and service logs."""
 
@@ -92,7 +108,7 @@ class TelegramService:
             flood_sleep_threshold=0, request_retries=3 if login else 0,
             raise_last_call_error=True, connection_retries=2,
             timeout=15, device_model="Checkin Manager", system_version="Linux",
-            app_version="1.4.0",
+            app_version="1.4.1",
         )
 
     async def prune(self):
@@ -229,8 +245,7 @@ class TelegramService:
                 await client.connect()
                 if not await client.is_user_authorized():
                     raise CheckinError("帐号会话失效，请重新登录")
-                return [{"id": str(d.id), "name": d.name or str(d.id)}
-                        async for d in client.iter_dialogs(limit=150)]
+                return [dialog_summary(d) async for d in client.iter_dialogs(limit=150)]
 
     async def resolve(self, client, target):
         if target.lstrip("-").isdigit():
@@ -460,6 +475,10 @@ def friendly_error(exc, *, login=False):
         "AuthKeyUnregisteredError": "帐号会话失效，请重新登录",
         "SessionRevokedError": "帐号会话已撤销，请重新登录",
         "ChatWriteForbiddenError": "当前帐号没有向此对话发送消息的权限",
+        "PeerIdInvalidError": "目标对话无效或当前帐号未识别此对话；请使用该帐号重新选择目标，机器人私聊可填写 @用户名",
+        "ChannelInvalidError": "群组或频道标识无效；请重新选择目标并保留完整 ID，不要删掉负号或 -100 前缀",
+        "ChannelPrivateError": "当前帐号无法访问此群组或频道；请确认该帐号已加入且未被移除",
+        "UserBannedInChannelError": "当前帐号被限制在此群组或频道发言；请在 Telegram 核实权限",
         "UserDeactivatedBanError": "Telegram 帐号已被限制",
         "SlowModeWaitError": "此对话触发 Telegram 慢速模式，请等待后再执行",
     }

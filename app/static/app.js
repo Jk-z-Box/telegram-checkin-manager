@@ -243,13 +243,17 @@ $("#job-account").onchange = () => {
   if($("#job-form").elements.id.value) $("#job-form").elements.target.value = "";
 };
 $("#job-dialog").addEventListener("close",()=>{dialogLoadVersion++;});
+function dialogLabel(dialog) {
+  const kind = {bot:"机器人私聊",user:"用户私聊",group:"普通群组",supergroup:"超级群组",channel:"频道",other:"其他对话"}[dialog.kind] || "对话";
+  return `【${kind}】${dialog.name}${dialog.username ? " · @"+dialog.username : ""} · ID ${dialog.id}`;
+}
 $("#load-dialogs").onclick = async e => {
   const version = ++dialogLoadVersion;
   const button = e.currentTarget;button.disabled = true;button.textContent = "加载中…";
   try {
     const dialogs = await api(`/accounts/${$("#job-account").value}/dialogs`);
     if(version !== dialogLoadVersion) return;
-    $("#dialog-options").innerHTML = '<option value="">选择对话（最多显示最近 150 个）</option>' + dialogs.map(d=>`<option value="${esc(d.id)}">${esc(d.name)} · ${esc(d.id)}</option>`).join("");
+    $("#dialog-options").innerHTML = '<option value="">选择对话（最多显示最近 150 个）</option>' + dialogs.map(d=>`<option value="${esc(d.id)}">${esc(dialogLabel(d))}</option>`).join("");
     $("#dialog-options").hidden = false;
   } catch(e) {if(version === dialogLoadVersion) $("#job-form .modal-error").textContent = e.message;}
   finally {if(version === dialogLoadVersion) {button.disabled=!$("#job-account").value;button.textContent="选择对话";}}
