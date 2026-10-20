@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>签到工作台 · Telegram Check-in</title>
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=1.2.1">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -82,8 +82,12 @@
     <p id="job-selection-help" class="picker-help">选择多个帐号后，任务列表只显示一个集合。单次最多 100 个帐号。</p>
   </fieldset>
   <label><span id="job-account-label">Telegram 帐号</span><select name="account_id" id="job-account"></select></label>
-  <label>目标对话<div class="input-row"><input name="target" required maxlength="128" placeholder="@bot_username 或 -100… 对话 ID"><button class="secondary" type="button" id="load-dialogs">选择对话</button></div></label><select id="dialog-options" aria-label="可用对话" hidden><option value="">选择已加入的对话</option></select>
-  <p id="batch-target-help" class="field-help">对话列表来自上方指定帐号；所有选中的帐号都需能访问目标对话。</p>
+  <div class="target-field">
+    <label for="job-target">目标对话</label>
+    <div class="input-row"><input id="job-target" name="target" required maxlength="128" aria-describedby="batch-target-help" placeholder="@bot_username 或 -100… 对话 ID"><button class="secondary" type="button" id="load-dialogs">选择对话</button></div>
+    <select id="dialog-options" aria-label="可用对话" hidden><option value="">选择已加入的对话</option></select>
+    <p id="batch-target-help" class="field-help">对话列表来自上方指定帐号；所有选中的帐号都需能访问目标对话。</p>
+  </div>
   <label>签到消息<textarea name="message" required maxlength="4096" rows="3" placeholder="/checkin"></textarea></label>
   <div class="form-grid"><label>Cron 计划<input name="cron" required value="0 9 * * *" placeholder="0 9 * * *"></label><label>时区<input name="timezone" required value="Asia/Shanghai" placeholder="Asia/Shanghai"></label></div>
   <p class="field-help">五段格式：分 时 日 月 星期；星期 0=周一、6=周日，可写 mon–sun。默认每天 09:00。</p>

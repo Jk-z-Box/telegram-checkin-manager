@@ -56,7 +56,7 @@ class TelegramService:
             flood_sleep_threshold=0, request_retries=3 if login else 0,
             raise_last_call_error=True, connection_retries=2,
             timeout=15, device_model="Checkin Manager", system_version="Linux",
-            app_version="1.2.0",
+            app_version="1.2.1",
         )
 
     async def prune(self):
