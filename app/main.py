@@ -122,14 +122,15 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
             raise HTTPException(404, "任务集合不存在")
         return members
 
-    def save_group(db, data, group_id=None):
+    def save_group(db, data, group_id=None, source_job=None):
         placeholders = ",".join("?" for _ in data.account_ids)
         accounts = db.all(f"SELECT id FROM accounts WHERE id IN ({placeholders})", tuple(data.account_ids))
         if len(accounts) != len(data.account_ids):
             raise HTTPException(404, "部分帐号已不存在，请刷新帐号列表后重试；本次未保存更改")
         fields = data.model_dump(exclude={"account_ids"})
         fields["next_run"] = next_time(data.cron, data.timezone)
-        existing = {j["account_id"]: j for j in db.all("SELECT * FROM jobs WHERE group_id=?", (group_id,))}
+        existing = ({source_job["account_id"]: source_job} if source_job is not None else
+                    {j["account_id"]: j for j in db.all("SELECT * FROM jobs WHERE group_id=?", (group_id,))})
         ids = []
         try:
             # Commit the collection and all its members together. Existing member
@@ -137,6 +138,8 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
             with db.db:
                 if group_id is None:
                     group_id = db.db.execute("INSERT INTO job_groups(created) VALUES(?)", (time.time(),)).lastrowid
+                if source_job is not None:
+                    db.db.execute("UPDATE jobs SET group_id=? WHERE id=?", (group_id, source_job["id"]))
                 for account_id in data.account_ids:
                     if account_id in existing:
                         job_id = existing[account_id]["id"]
@@ -318,6 +321,18 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
     @app.post("/api/jobs/batch")
     async def job_create_batch(data: BatchJob, session=Depends(auth), db=Depends(store)):
         return save_group(db, data)
+
+    @app.post("/api/jobs/{job_id}/convert-to-group")
+    async def job_convert_group(job_id: int, data: BatchJob, request: Request,
+                                session=Depends(auth), db=Depends(store)):
+        job = require_job(db, job_id)
+        if job["group_id"] is not None:
+            raise HTTPException(409, "此任务已属于集合，请刷新页面后通过集合统一编辑")
+        if job_id in request.app.state.runner.tasks:
+            raise HTTPException(409, "任务正在排队、发送或等待回复，请完成后转为集合")
+        if len(data.account_ids) < 2:
+            raise HTTPException(422, "转为任务集合请至少选择两个帐号；只选一个帐号请保存为独立任务")
+        return save_group(db, data, source_job=job)
 
     @app.put("/api/job-groups/{group_id}")
     async def group_update(group_id: int, data: BatchJob, request: Request, session=Depends(auth), db=Depends(store)):

@@ -162,11 +162,10 @@ function openJob(job) {
   const form = $("#job-form"); form.reset();
   dialogLoadVersion++;
   $("#job-account").disabled = false;$("#load-dialogs").disabled = false;$("#load-dialogs").textContent = "选择对话";
-  const singleEdit = !!job?.id && !job?.members;
-  $("#job-account-picker").hidden = singleEdit;
-  $("#batch-target-help").hidden = singleEdit;
-  $("#job-account-label").textContent = singleEdit ? "Telegram 帐号" : "从此帐号读取对话";
-  const selected = job?.account_ids || [state.accounts[0].id];
+  $("#job-account-picker").hidden = false;
+  $("#batch-target-help").hidden = false;
+  $("#job-account-label").textContent = "从此帐号读取对话";
+  const selected = job?.account_ids || [job?.account_id || state.accounts[0].id];
   $("#job-accounts").innerHTML = state.accounts.map(a=>`<label class="account-choice"><input type="checkbox" value="${a.id}" ${selected.includes(a.id)?"checked":""}><span><b>${esc(a.name)}</b><small>${esc(a.phone)}${a.enabled?"":" · 已暂停"}</small></span></label>`).join("");
   $("#job-account").innerHTML = state.accounts.map(a=>`<option value="${a.id}">${esc(a.name)}${a.enabled?"":"（已暂停）"}</option>`).join("");
   $("#job-title").textContent = job ? "编辑签到任务" : "新建签到任务";
@@ -176,8 +175,7 @@ function openJob(job) {
   }
   form.elements.namedItem("id").value = job?.id || "";
   form.elements.namedItem("group_id").value = job?.group_id || "";
-  if(!singleEdit) syncJobAccounts();
-  else $("#job-submit").textContent = "保存任务";
+  syncJobAccounts();
   syncRetryOptions();
   $("#dialog-options").hidden = true;
   form.querySelector(".modal-error").textContent = "";
@@ -193,20 +191,19 @@ $("#job-form").onsubmit = e => {e.preventDefault();busy(e.target,async () => {
   data.send_timeout = Number(e.target.elements.send_timeout.value);
   data.max_retries = Number(e.target.elements.max_retries.value);
   let message = "任务已保存";
-  if(id) {data.account_id = Number(data.account_id);await api(`/jobs/${id}`,"PUT",data);}
-  else {
-    const accountIds = selectedJobAccounts();
-    if(!accountIds.length) throw new Error("请至少选择一个 Telegram 帐号");
-    if(accountIds.length>100) throw new Error("每个集合最多选择 100 个帐号");
-    delete data.account_id;
-    if(groupId || accountIds.length>1) {
-      data.account_ids = accountIds;
-      const result = await api(groupId ? `/job-groups/${groupId}` : "/jobs/batch",groupId?"PUT":"POST",data);
-      groupResults.delete(result.group_id);
-      message = `任务集合已保存 · ${result.count} 个帐号`;
-    } else {
-      data.account_id = accountIds[0];await api("/jobs","POST",data);
-    }
+  const accountIds = selectedJobAccounts();
+  if(!accountIds.length) throw new Error("请至少选择一个 Telegram 帐号");
+  if(accountIds.length>100) throw new Error("每个集合最多选择 100 个帐号");
+  delete data.account_id;
+  if(groupId || accountIds.length>1) {
+    data.account_ids = accountIds;
+    const path = groupId ? `/job-groups/${groupId}` : id ? `/jobs/${id}/convert-to-group` : "/jobs/batch";
+    const result = await api(path,groupId?"PUT":"POST",data);
+    groupResults.delete(result.group_id);
+    message = id ? `已转为任务集合 · ${result.count} 个帐号` : `任务集合已保存 · ${result.count} 个帐号`;
+  } else {
+    data.account_id = accountIds[0];
+    await api(id ? `/jobs/${id}` : "/jobs",id?"PUT":"POST",data);
   }
   $("#job-dialog").close();toast(message);await refresh();
 });};
@@ -225,10 +222,11 @@ function syncJobAccounts() {
   $("#job-account").innerHTML = state.accounts.filter(a=>selected.includes(a.id)).map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join("");
   if(selected.includes(Number(source))) $("#job-account").value = source;
   $("#job-account").disabled = !selected.length;$("#load-dialogs").disabled = !selected.length;$("#load-dialogs").textContent = "选择对话";
-  const editing = !!$("#job-form").elements.group_id.value, group = editing || selected.length>1;
-  $("#job-title").textContent = editing ? "编辑任务集合" : group ? "新建任务集合" : "新建签到任务";
-  $("#job-submit").textContent = editing ? "保存集合" : group ? `创建集合 · ${selected.length} 个帐号` : "创建任务";
-  $("#job-selection-help").textContent = editing ? "统一修改集合配置；增减勾选帐号可调整成员，已有成员的历史记录保留。" : "选择多个帐号后，任务列表只显示一个集合。单次最多 100 个帐号。";
+  const editing = !!$("#job-form").elements.group_id.value, singleEdit = !!$("#job-form").elements.id.value;
+  const group = editing || selected.length>1;
+  $("#job-title").textContent = editing ? "编辑任务集合" : singleEdit ? (group ? "将任务转为集合" : "编辑签到任务") : group ? "新建任务集合" : "新建签到任务";
+  $("#job-submit").textContent = editing ? "保存集合" : singleEdit ? (group ? `转为集合 · ${selected.length} 个帐号` : "保存任务") : group ? `创建集合 · ${selected.length} 个帐号` : "创建任务";
+  $("#job-selection-help").textContent = editing ? "统一修改集合配置；增减勾选帐号可调整成员，已有成员的历史记录保留。" : singleEdit ? "可勾选多个帐号，将此任务转为一个集合；原执行记录保留。单次最多 100 个帐号。" : "选择多个帐号后，任务列表只显示一个集合。单次最多 100 个帐号。";
   dialogLoadVersion++;$("#dialog-options").hidden = true;
 }
 $("#job-accounts").onchange = syncJobAccounts;
@@ -240,7 +238,6 @@ $("#clear-accounts").onclick = () => {document.querySelectorAll("#job-accounts i
 $("#job-account").onchange = () => {
   dialogLoadVersion++;$("#dialog-options").hidden = true;
   $("#load-dialogs").disabled = false;$("#load-dialogs").textContent = "选择对话";
-  if($("#job-form").elements.id.value) $("#job-form").elements.target.value = "";
 };
 $("#job-dialog").addEventListener("close",()=>{dialogLoadVersion++;});
 function dialogLabel(dialog) {
