@@ -100,10 +100,10 @@ function renderJobs() {
     <td><code>${esc(j.cron)}</code><small>${esc(j.timezone)}${j.enabled||j.partial ? " · 下次 "+date(j.next_run,j.timezone) : ""}</small></td>
     <td><button class="text-button" data-action="toggle-group" data-id="${j.id}" title="统一切换集合状态"><span class="badge ${j.enabled?"on":""}">${j.enabled?"● 已启用":j.partial?"◐ 部分启用":"○ 已暂停"}</span></button></td>
     <td><div class="table-actions"><button class="text-button" data-action="run-group" data-id="${j.id}">▷ 执行集合</button><button class="text-button" data-action="edit-group" data-id="${j.id}">编辑</button><button class="text-button delete" data-action="delete-group" data-id="${j.id}">删除</button></div></td>
-    </tr><tr id="group-members-${j.id}" class="group-members" ${expandedGroups.has(j.id)?"":"hidden"}><td colspan="5"><div class="member-heading">集合成员 <span>各帐号的执行结果可在「执行记录」查看</span></div>${j.members.map(m=>{
+    </tr><tr id="group-members-${j.id}" class="group-members" ${expandedGroups.has(j.id)?"":"hidden"}><td colspan="5"><div class="member-heading">集合成员 <span>逐个执行，间隔 2 秒；进度与结果见「执行记录」</span></div>${j.members.map(m=>{
       const account = state.accounts.find(a=>a.id===m.account_id);
       const result = groupResults.get(j.id)?.find(r=>r.job_id===m.id);
-      return `<div class="group-member"><b>${esc(m.account_name)}</b><span class="badge ${m.enabled&&account?.enabled?"on":""}">${!account?.enabled?"帐号已暂停":m.enabled?"已启用":"任务已暂停"}</span><small>${result ? esc(result.status==="started"?"本次已开始执行":result.detail) : esc(account?.cooldown>Date.now()/1000?"帐号限流冷却中":m.enabled?"下次 "+date(m.next_run,m.timezone):"等待启用")}</small></div>`;
+      return `<div class="group-member"><b>${esc(m.account_name)}</b><span class="badge ${m.enabled&&account?.enabled?"on":""}">${!account?.enabled?"帐号已暂停":m.enabled?"已启用":"任务已暂停"}</span><small>${result ? esc(result.status==="started"?"本次已加入执行队列":result.detail) : esc(account?.cooldown>Date.now()/1000?"帐号限流冷却中":m.enabled?"下次 "+date(m.next_run,m.timezone):"等待启用")}</small></div>`;
     }).join("")}</td></tr>` : `<tr>
     <td><strong>${esc(j.name)}</strong><small>${esc(j.target)}</small></td>
     <td>${esc(j.account_name)}</td>
@@ -117,7 +117,7 @@ $("#search").oninput = renderJobs;
 function renderAccounts() {
   $("#accounts-grid").innerHTML = state.accounts.length ? state.accounts.map(a => `<article class="account-card"><header><span class="avatar">${esc(a.name.slice(0,1).toUpperCase())}</span><span class="badge ${a.enabled?"on":""}">${a.cooldown>Date.now()/1000?"冷却中":a.enabled?"● 已启用":"已暂停"}</span></header><h3>${esc(a.name)}</h3><p>${esc(a.phone)}<br>帐号 ID ${a.uid}</p>${a.cooldown>Date.now()/1000?`<p>冷却结束：${date(a.cooldown)}（北京时间）</p>`:""}<footer><button class="text-button" data-action="toggle-account" data-id="${a.id}">${a.enabled?"暂停帐号":"启用帐号"}</button><button class="text-button delete" data-action="delete-account" data-id="${a.id}">移除帐号</button></footer></article>`).join("") : '<section class="panel empty"><span>◎</span><h3>还没有连接帐号</h3><p>点击「连接帐号」开始设置。</p></section>';
 }
-const labels = {sent:"已发送",confirmed:"已确认",unconfirmed:"未确认",failed:"失败",unknown:"结果未知",running:"执行中",skipped:"已跳过"};
+const labels = {sent:"已发送",confirmed:"已确认",unconfirmed:"未确认",failed:"失败",unknown:"结果未知",queued:"排队中",running:"执行中",skipped:"已跳过"};
 async function loadLogs() {
   const logs = await api("/runs");
   $("#logs-body").innerHTML = logs.map(r => `<tr><td>${date(r.started)}<small>北京时间 · ${r.source === "manual"?"手动执行":"自动调度"}</small></td><td><strong>${esc(r.job_name)}</strong><small>${esc(r.account_name)}</small></td><td><span class="badge ${esc(r.status)}">${labels[r.status]||esc(r.status)}</span></td><td class="log-detail">${esc(r.detail||"正在等待 Telegram 响应…")}</td></tr>`).join("");
@@ -142,13 +142,13 @@ document.addEventListener("click", async e => {
     if(action === "run-group") {
       const result = await api(`/job-groups/${id}/run`,"POST",{});
       groupResults.set(id,result.results);expandedGroups.add(id);
-      toast(`集合：已开始 ${result.started} 个，未启动 ${result.results.length-result.started} 个；展开成员查看说明`);
+      toast(`集合：已加入队列 ${result.started} 个，未启动 ${result.results.length-result.started} 个；逐个执行，间隔 2 秒`);
     }
     if(action === "delete-group" && confirm(`删除集合「${group.name}」及其 ${group.members.length} 个帐号的任务？执行记录会保留。`)) {
       await api(`/job-groups/${id}`,"DELETE");expandedGroups.delete(id);groupResults.delete(id);
     }
     if(action === "edit") openJob(job);
-    if(action === "run") {await api(`/jobs/${id}/run`,"POST",{});toast("任务已开始执行，请在执行记录查看结果");}
+    if(action === "run") {await api(`/jobs/${id}/run`,"POST",{});toast("任务已加入执行队列，请在执行记录查看进度");}
     if(action === "toggle-job") await api(`/jobs/${id}`,"PATCH",{enabled:!job.enabled});
     if(action === "toggle-account") await api(`/accounts/${id}`,"PATCH",{enabled:!account.enabled});
     if(action === "delete-job" && confirm(`删除任务「${job.name}」？执行记录会保留。`)) await api(`/jobs/${id}`,"DELETE");

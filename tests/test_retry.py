@@ -154,6 +154,25 @@ def test_connection_timeout_exhaustion_is_definitely_unsent():
     assert client.connect.await_count == 3 and client.attempts == []
 
 
+def test_lookup_rpc_failure_reports_stage_and_does_not_claim_message_submitted():
+    service, client, job = scenario([])
+    job["retry_enabled"] = False
+    client.get_input_entity.side_effect = errors.RpcCallFailError(request=None)
+    status, detail = asyncio.run(service.send({"secret": ""}, job))
+    assert status == "failed"
+    assert "查找目标对话失败" in detail and "RpcCallFailError" in detail and "消息未发送" in detail
+    assert client.attempts == []
+
+
+def test_saved_messages_peer_resolves_current_account_without_get_entity():
+    service, client, job = scenario(["ok"])
+    client.get_input_entity.return_value = types.InputPeerSelf()
+    client.get_me = AsyncMock(return_value=types.User(id=44, first_name="Mock"))
+    assert asyncio.run(service.send({"secret": ""}, job))[0] == "sent"
+    client.get_me.assert_awaited_once()
+    client.get_entity.assert_not_awaited()
+
+
 def test_cancel_during_send_does_not_retry():
     async def run():
         service, client, job = scenario(["hang"])

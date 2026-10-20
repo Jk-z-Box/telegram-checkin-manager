@@ -19,7 +19,8 @@ class Client:
         self.connect = AsyncMock()
         self.disconnect = AsyncMock()
         self.is_user_authorized = AsyncMock(return_value=True)
-        self.get_input_entity = AsyncMock(return_value="target")
+        self.get_input_entity = AsyncMock(return_value=types.InputPeerUser(user_id=44, access_hash=123)
+                                         if private else types.InputPeerChat(chat_id=44))
         from telethon.tl.types import User, Chat
         self.get_entity = AsyncMock(return_value=User(id=44,first_name="Bot") if private else Chat(
             id=44,title="Group",photo=None,participants_count=1,date=None,version=1))
@@ -63,6 +64,7 @@ def test_send_only_does_not_claim_confirmation():
     result = asyncio.run(service.send({"secret":""},job))
     assert result[0] == "sent"
     assert client.disconnect.await_count == 1
+    client.get_entity.assert_not_awaited()
 
 
 def test_group_ignores_unrelated_success():

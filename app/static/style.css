@@ -1,5 +1,6 @@
 @import url("/static/fonts.css");
 #mobile-logout{display:none}
+.badge.queued{background:#edf1f9;color:#687da2}
 .target-field{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;min-width:0;margin-bottom:18px}
 .target-field>label,.target-field>.field-help,.target-field>select,.target-field .input-row>input,.target-field .input-row>button{margin:0}
 .target-field>select{min-width:0;text-overflow:ellipsis}

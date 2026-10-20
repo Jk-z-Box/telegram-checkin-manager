@@ -89,7 +89,7 @@ class TelegramService:
             flood_sleep_threshold=0, request_retries=3 if login else 0,
             raise_last_call_error=True, connection_retries=2,
             timeout=15, device_model="Checkin Manager", system_version="Linux",
-            app_version="1.3.0",
+            app_version="1.3.1",
         )
 
     async def prune(self):
@@ -227,22 +227,31 @@ class TelegramService:
         try:
             for attempt in range(retries + 1):
                 prefix = f"发送尝试 {attempt + 1} 次（重试 {attempt} 次）；"
+                stage = "连接 Telegram"
                 try:
                     # Only preparation and message submission share this timeout.
                     # The reply deadline starts after a confirmed send response.
                     async with asyncio.timeout(timeout):
                         await client.connect()
                         if request is None:
+                            stage = "检查帐号会话"
                             if not await client.is_user_authorized():
                                 raise CheckinError("帐号会话失效，请重新登录")
+                            stage = "查找目标对话"
                             target = await self.resolve(client, job["target"])
-                            entity = await client.get_entity(target)
+                            # The input peer already identifies its type and ID.
+                            # Avoid an extra users/chats lookup for every task.
+                            entity = target
+                            if isinstance(target, types.InputPeerSelf):
+                                stage = "读取当前帐号信息"
+                                entity = await client.get_me()
                             peer_id = utils.get_peer_id(entity)
-                            is_private = hasattr(entity, "first_name")
+                            is_private = isinstance(entity, (types.InputPeerUser, types.InputPeerUserFromMessage, types.User))
                             # Build once: every retry uses the same random_id, so
                             # Telegram can deduplicate a send whose response was lost.
                             # No formatting entities: preserve the original plain text.
                             request = functions.messages.SendMessageRequest(peer=target, message=job["message"])
+                        stage = "提交签到消息"
                         dispatched = True
                         result = await client(request)
                     sent_id = sent_message_id(result, request.random_id)
@@ -265,7 +274,7 @@ class TelegramService:
                                "未开启失败后重试" if transient else "此错误不自动重试")
                         status = "unknown" if uncertain else "failed"
                         detail = "；请在 Telegram 核实是否已发送" if uncertain else "；消息未发送"
-                        return status, prefix + reason + "；" + end + detail
+                        return status, prefix + stage + "失败：" + reason + "；" + end + detail
                     await asyncio.sleep(RETRY_DELAY)
 
             if not job["button"] and not job["success_text"]:
