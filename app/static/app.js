@@ -1,6 +1,8 @@
 "use strict";
 const $ = (s) => document.querySelector(s);
 const state = {csrf: "", page: "tasks", accounts: [], jobs: [], paused: false, ticket: "", stage: "start", logged: false};
+const expandedGroups = new Set(), groupResults = new Map();
+let dialogLoadVersion = 0;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const date = (v, zone) => new Date(v * 1000).toLocaleString("zh-CN", {timeZone: zone || "Asia/Shanghai", month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false});
 let toastTimer, authEpoch = 0;
@@ -18,6 +20,7 @@ async function api(path, method="GET", data) {
 function logoutView() {
   authEpoch++;
   state.logged = false; state.csrf = ""; state.accounts = []; state.jobs = [];
+  expandedGroups.clear(); groupResults.clear();
   document.querySelectorAll("dialog[open]").forEach(d => d.close());
   $("#app-view").hidden = true; $("#login-view").hidden = false;
 }
@@ -58,7 +61,6 @@ async function refresh() {
     state.accounts = accounts; state.jobs = jobs; state.paused = overview.paused;
     $("#stat-accounts").textContent = overview.accounts; $("#stat-jobs").textContent = overview.jobs;
     $("#stat-runs").textContent = overview.runs24h; $("#stat-confirmed").textContent = overview.confirmed24h;
-    $("#job-count").textContent = jobs.length; $("#nav-count").textContent = jobs.length;
     $("#schedule-label").textContent = state.paused ? "自动调度已暂停" : "自动调度运行中";
     $("#schedule-detail").textContent = state.paused ? "恢复后继续执行未来的计划；不会补发停用期间的任务。" : "按各任务的时区和计划自动执行。";
     $("#pause-all").textContent = state.paused ? "恢复调度" : "暂停全部";
@@ -70,10 +72,39 @@ async function refresh() {
     $("#connection").textContent = "连接中断";
   }
 }
+function jobEntries() {
+  const entries = [], groups = new Map();
+  for(const job of state.jobs) {
+    if(job.group_id == null) {entries.push(job);continue;}
+    if(!groups.has(job.group_id)) {
+      const group = {...job, id:job.group_id, members:[]};
+      groups.set(job.group_id, group);entries.push(group);
+    }
+    groups.get(job.group_id).members.push(job);
+  }
+  for(const group of groups.values()) {
+    group.enabled = group.members.every(j=>j.enabled);
+    group.partial = !group.enabled && group.members.some(j=>j.enabled);
+    group.next_run = Math.min(...group.members.filter(j=>j.enabled).map(j=>j.next_run));
+  }
+  return entries;
+}
 function renderJobs() {
   const term = $("#search").value.toLowerCase();
-  const jobs = state.jobs.filter(j => `${j.name} ${j.target} ${j.account_name}`.toLowerCase().includes(term));
-  $("#jobs-body").innerHTML = jobs.map(j => `<tr>
+  const entries = jobEntries();
+  $("#job-count").textContent = entries.length; $("#nav-count").textContent = entries.length;
+  const jobs = entries.filter(j => `${j.name} ${j.target} ${j.members?.map(m=>m.account_name).join(" ") || j.account_name}`.toLowerCase().includes(term));
+  $("#jobs-body").innerHTML = jobs.map(j => j.members ? `<tr>
+    <td><strong>${esc(j.name)} <span class="badge on">集合</span></strong><small>${esc(j.target)}</small></td>
+    <td><button class="text-button group-expand" data-action="expand-group" data-id="${j.id}" aria-expanded="${expandedGroups.has(j.id)}" aria-controls="group-members-${j.id}">${expandedGroups.has(j.id)?"▾":"▸"} ${j.members.length} 个帐号</button></td>
+    <td><code>${esc(j.cron)}</code><small>${esc(j.timezone)}${j.enabled||j.partial ? " · 下次 "+date(j.next_run,j.timezone) : ""}</small></td>
+    <td><button class="text-button" data-action="toggle-group" data-id="${j.id}" title="统一切换集合状态"><span class="badge ${j.enabled?"on":""}">${j.enabled?"● 已启用":j.partial?"◐ 部分启用":"○ 已暂停"}</span></button></td>
+    <td><div class="table-actions"><button class="text-button" data-action="run-group" data-id="${j.id}">▷ 执行集合</button><button class="text-button" data-action="edit-group" data-id="${j.id}">编辑</button><button class="text-button delete" data-action="delete-group" data-id="${j.id}">删除</button></div></td>
+    </tr><tr id="group-members-${j.id}" class="group-members" ${expandedGroups.has(j.id)?"":"hidden"}><td colspan="5"><div class="member-heading">集合成员 <span>各帐号的执行结果可在「执行记录」查看</span></div>${j.members.map(m=>{
+      const account = state.accounts.find(a=>a.id===m.account_id);
+      const result = groupResults.get(j.id)?.find(r=>r.job_id===m.id);
+      return `<div class="group-member"><b>${esc(m.account_name)}</b><span class="badge ${m.enabled&&account?.enabled?"on":""}">${!account?.enabled?"帐号已暂停":m.enabled?"已启用":"任务已暂停"}</span><small>${result ? esc(result.status==="started"?"本次已开始执行":result.detail) : esc(account?.cooldown>Date.now()/1000?"帐号限流冷却中":m.enabled?"下次 "+date(m.next_run,m.timezone):"等待启用")}</small></div>`;
+    }).join("")}</td></tr>` : `<tr>
     <td><strong>${esc(j.name)}</strong><small>${esc(j.target)}</small></td>
     <td>${esc(j.account_name)}</td>
     <td><code>${esc(j.cron)}</code><small>${esc(j.timezone)}${j.enabled ? " · 下次 "+date(j.next_run,j.timezone) : ""}</small></td>
@@ -98,9 +129,24 @@ document.addEventListener("click", async e => {
   const button = e.target.closest("[data-action]");
   if(!button) return;
   const id = Number(button.dataset.id), action = button.dataset.action;
+  if(action === "expand-group") {
+    expandedGroups.has(id) ? expandedGroups.delete(id) : expandedGroups.add(id);
+    renderJobs();return;
+  }
   button.disabled = true;
   try {
     const job = state.jobs.find(j=>j.id===id), account = state.accounts.find(a=>a.id===id);
+    const group = jobEntries().find(j=>j.members && j.id===id);
+    if(action === "edit-group") openJob({...group, id:"", group_id:id, account_ids:group.members.map(j=>j.account_id)});
+    if(action === "toggle-group") await api(`/job-groups/${id}`,"PATCH",{enabled:!group.enabled});
+    if(action === "run-group") {
+      const result = await api(`/job-groups/${id}/run`,"POST",{});
+      groupResults.set(id,result.results);expandedGroups.add(id);
+      toast(`集合：已开始 ${result.started} 个，未启动 ${result.results.length-result.started} 个；展开成员查看说明`);
+    }
+    if(action === "delete-group" && confirm(`删除集合「${group.name}」及其 ${group.members.length} 个帐号的任务？执行记录会保留。`)) {
+      await api(`/job-groups/${id}`,"DELETE");expandedGroups.delete(id);groupResults.delete(id);
+    }
     if(action === "edit") openJob(job);
     if(action === "run") {await api(`/jobs/${id}/run`,"POST",{});toast("任务已开始执行，请在执行记录查看结果");}
     if(action === "toggle-job") await api(`/jobs/${id}`,"PATCH",{enabled:!job.enabled});
@@ -114,6 +160,14 @@ document.querySelectorAll(".close-modal").forEach(b => b.onclick = () => b.close
 function openJob(job) {
   if(!state.accounts.length) {toast("请先连接一个 Telegram 帐号");page("accounts");openAccount();return;}
   const form = $("#job-form"); form.reset();
+  dialogLoadVersion++;
+  $("#job-account").disabled = false;$("#load-dialogs").disabled = false;$("#load-dialogs").textContent = "选择对话";
+  const singleEdit = !!job?.id && !job?.members;
+  $("#job-account-picker").hidden = singleEdit;
+  $("#batch-target-help").hidden = singleEdit;
+  $("#job-account-label").textContent = singleEdit ? "Telegram 帐号" : "从此帐号读取对话";
+  const selected = job?.account_ids || [state.accounts[0].id];
+  $("#job-accounts").innerHTML = state.accounts.map(a=>`<label class="account-choice"><input type="checkbox" value="${a.id}" ${selected.includes(a.id)?"checked":""}><span><b>${esc(a.name)}</b><small>${esc(a.phone)}${a.enabled?"":" · 已暂停"}</small></span></label>`).join("");
   $("#job-account").innerHTML = state.accounts.map(a=>`<option value="${a.id}">${esc(a.name)}${a.enabled?"":"（已暂停）"}</option>`).join("");
   $("#job-title").textContent = job ? "编辑签到任务" : "新建签到任务";
   if(job) for(const [key,value] of Object.entries(job)) {
@@ -121,6 +175,9 @@ function openJob(job) {
     if(field) {if(field.type === "checkbox") field.checked = !!value; else field.value = value;}
   }
   form.elements.namedItem("id").value = job?.id || "";
+  form.elements.namedItem("group_id").value = job?.group_id || "";
+  if(!singleEdit) syncJobAccounts();
+  else $("#job-submit").textContent = "保存任务";
   $("#dialog-options").hidden = true;
   form.querySelector(".modal-error").textContent = "";
   $("#job-dialog").showModal();
@@ -128,19 +185,64 @@ function openJob(job) {
 $("#new-job").onclick = () => openJob();
 $("#empty-start").onclick = () => {page("accounts");openAccount();};
 $("#job-form").onsubmit = e => {e.preventDefault();busy(e.target,async () => {
-  const data = Object.fromEntries(new FormData(e.target)), id = data.id;
-  delete data.id; data.account_id = Number(data.account_id);data.reply_timeout = Number(data.reply_timeout);data.enabled = e.target.elements.enabled.checked;
-  await api(id ? `/jobs/${id}` : "/jobs",id ? "PUT" : "POST",data);
-  $("#job-dialog").close();toast("任务已保存");await refresh();
+  const data = Object.fromEntries(new FormData(e.target)), id = data.id, groupId = data.group_id;
+  delete data.id;delete data.group_id;
+  data.reply_timeout = Number(data.reply_timeout);data.enabled = e.target.elements.enabled.checked;
+  let message = "任务已保存";
+  if(id) {data.account_id = Number(data.account_id);await api(`/jobs/${id}`,"PUT",data);}
+  else {
+    const accountIds = selectedJobAccounts();
+    if(!accountIds.length) throw new Error("请至少选择一个 Telegram 帐号");
+    if(accountIds.length>100) throw new Error("每个集合最多选择 100 个帐号");
+    delete data.account_id;
+    if(groupId || accountIds.length>1) {
+      data.account_ids = accountIds;
+      const result = await api(groupId ? `/job-groups/${groupId}` : "/jobs/batch",groupId?"PUT":"POST",data);
+      groupResults.delete(result.group_id);
+      message = `任务集合已保存 · ${result.count} 个帐号`;
+    } else {
+      data.account_id = accountIds[0];await api("/jobs","POST",data);
+    }
+  }
+  $("#job-dialog").close();toast(message);await refresh();
 });};
-$("#job-account").onchange = () => {$("#dialog-options").hidden = true;$("#job-form").elements.target.value = "";};
+function selectedJobAccounts() {
+  return [...document.querySelectorAll("#job-accounts input:checked")].map(input=>Number(input.value));
+}
+function syncJobAccounts() {
+  const selected = selectedJobAccounts(), source = $("#job-account").value;
+  $("#selected-account-count").textContent = `已选 ${selected.length} 个`;
+  $("#job-account").innerHTML = state.accounts.filter(a=>selected.includes(a.id)).map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join("");
+  if(selected.includes(Number(source))) $("#job-account").value = source;
+  $("#job-account").disabled = !selected.length;$("#load-dialogs").disabled = !selected.length;$("#load-dialogs").textContent = "选择对话";
+  const editing = !!$("#job-form").elements.group_id.value, group = editing || selected.length>1;
+  $("#job-title").textContent = editing ? "编辑任务集合" : group ? "新建任务集合" : "新建签到任务";
+  $("#job-submit").textContent = editing ? "保存集合" : group ? `创建集合 · ${selected.length} 个帐号` : "创建任务";
+  $("#job-selection-help").textContent = editing ? "统一修改集合配置；增减勾选帐号可调整成员，已有成员的历史记录保留。" : "选择多个帐号后，任务列表只显示一个集合。单次最多 100 个帐号。";
+  dialogLoadVersion++;$("#dialog-options").hidden = true;
+}
+$("#job-accounts").onchange = syncJobAccounts;
+$("#select-all-accounts").onclick = () => {
+  if(state.accounts.length>100) {toast("每个集合最多 100 个帐号，请手动选择");return;}
+  document.querySelectorAll("#job-accounts input").forEach(input=>input.checked=true);syncJobAccounts();
+};
+$("#clear-accounts").onclick = () => {document.querySelectorAll("#job-accounts input").forEach(input=>input.checked=false);syncJobAccounts();};
+$("#job-account").onchange = () => {
+  dialogLoadVersion++;$("#dialog-options").hidden = true;
+  $("#load-dialogs").disabled = false;$("#load-dialogs").textContent = "选择对话";
+  if($("#job-form").elements.id.value) $("#job-form").elements.target.value = "";
+};
+$("#job-dialog").addEventListener("close",()=>{dialogLoadVersion++;});
 $("#load-dialogs").onclick = async e => {
+  const version = ++dialogLoadVersion;
   const button = e.currentTarget;button.disabled = true;button.textContent = "加载中…";
   try {
     const dialogs = await api(`/accounts/${$("#job-account").value}/dialogs`);
+    if(version !== dialogLoadVersion) return;
     $("#dialog-options").innerHTML = '<option value="">选择对话（最多显示最近 150 个）</option>' + dialogs.map(d=>`<option value="${esc(d.id)}">${esc(d.name)} · ${esc(d.id)}</option>`).join("");
     $("#dialog-options").hidden = false;
-  } catch(e) {$("#job-form .modal-error").textContent = e.message;} finally {button.disabled=false;button.textContent="选择对话";}
+  } catch(e) {if(version === dialogLoadVersion) $("#job-form .modal-error").textContent = e.message;}
+  finally {if(version === dialogLoadVersion) {button.disabled=!$("#job-account").value;button.textContent="选择对话";}}
 };
 $("#dialog-options").onchange = e => {if(e.target.value) $("#job-form").elements.target.value = e.target.value;};
 function setStage(stage) {

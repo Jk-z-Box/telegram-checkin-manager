@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -70,6 +71,14 @@ def test_auth_csrf_origin_and_cookie(client):
     assert client.get("/api/overview").json()["paused"]
     assert client.post("/api/logout").status_code == 200
     assert client.get("/api/me").status_code == 401
+
+
+def test_parallel_dashboard_refresh_keeps_authenticated_session(client):
+    login(client)
+    paths = ["/api/overview", "/api/accounts", "/api/jobs"]
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        statuses = list(pool.map(lambda i: client.get(paths[i % 3]).status_code, range(180)))
+    assert statuses == [200] * 180
 
 
 def test_password_rotation_revokes_all_sessions(client):

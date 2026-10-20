@@ -2,6 +2,7 @@ import asyncio
 import fcntl
 import hashlib
 import secrets
+import sqlite3
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .models import AccountFinish, AccountStart, Job, Login, PasswordChange, Pause, Toggle, next_time
+from .models import AccountFinish, AccountStart, BatchJob, Job, Login, PasswordChange, Pause, Toggle, next_time
 from .runner import Runner
 from .store import PASSWORDS, Store, data_dir, save_config
 from .telegram import TelegramService, friendly_error
@@ -89,7 +90,10 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
     def store(request: Request):
         return request.app.state.store
 
-    def auth(request: Request, db=Depends(store)):
+    async def auth(request: Request, db=Depends(store)):
+        # Keep SQLite session reads on the same event loop as other DB access.
+        # A sync dependency runs in worker threads and can race shared statements
+        # during the dashboard's parallel refresh requests.
         token = request.cookies.get("tgcheckin", "")
         session = db.one("SELECT * FROM sessions WHERE token=? AND expires>?",
                          (hashlib.sha256(token.encode()).hexdigest(), time.time())) if token else None
@@ -111,6 +115,44 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
         if not job:
             raise HTTPException(404, "任务不存在")
         return job
+
+    def require_group(db, group_id):
+        members = db.all("SELECT * FROM jobs WHERE group_id=? ORDER BY id", (group_id,))
+        if not members:
+            raise HTTPException(404, "任务集合不存在")
+        return members
+
+    def save_group(db, data, group_id=None):
+        placeholders = ",".join("?" for _ in data.account_ids)
+        accounts = db.all(f"SELECT id FROM accounts WHERE id IN ({placeholders})", tuple(data.account_ids))
+        if len(accounts) != len(data.account_ids):
+            raise HTTPException(404, "部分帐号已不存在，请刷新帐号列表后重试；本次未保存更改")
+        fields = data.model_dump(exclude={"account_ids"})
+        fields["next_run"] = next_time(data.cron, data.timezone)
+        existing = {j["account_id"]: j for j in db.all("SELECT * FROM jobs WHERE group_id=?", (group_id,))}
+        ids = []
+        try:
+            # Commit the collection and all its members together. Existing member
+            # IDs are retained so their history and manual-run cooldown survive edits.
+            with db.db:
+                if group_id is None:
+                    group_id = db.db.execute("INSERT INTO job_groups(created) VALUES(?)", (time.time(),)).lastrowid
+                for account_id in data.account_ids:
+                    if account_id in existing:
+                        job_id = existing[account_id]["id"]
+                        db.db.execute(f"UPDATE jobs SET {','.join(key+'=?' for key in fields)} WHERE id=?",
+                                      (*fields.values(), job_id))
+                    else:
+                        values = {**fields, "account_id": account_id, "group_id": group_id, "created": time.time()}
+                        job_id = db.db.execute(
+                            f"INSERT INTO jobs({','.join(values)}) VALUES({','.join('?' for _ in values)})",
+                            tuple(values.values())).lastrowid
+                    ids.append(job_id)
+                db.db.execute(f"DELETE FROM jobs WHERE group_id=? AND account_id NOT IN ({placeholders})",
+                              (group_id, *data.account_ids))
+        except sqlite3.DatabaseError:
+            raise HTTPException(503, "集合保存失败，本次更改已撤销，请稍后重试") from None
+        return {"group_id": group_id, "ids": ids, "count": len(ids)}
 
     @app.get("/healthz")
     async def health():
@@ -176,7 +218,8 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
         return {
             "paused": db.paused(),
             "accounts": db.one("SELECT COUNT(*) n FROM accounts")["n"],
-            "jobs": db.one("SELECT COUNT(*) n FROM jobs WHERE enabled=1")["n"],
+            "jobs": db.one("""SELECT COUNT(DISTINCT CASE WHEN group_id IS NULL THEN 'j:'||id
+                              ELSE 'g:'||group_id END) n FROM jobs WHERE enabled=1""")["n"],
             "runs24h": db.one("SELECT COUNT(*) n FROM runs WHERE started>?",
                               (time.time()-86400,))["n"],
             "confirmed24h": db.one("SELECT COUNT(*) n FROM runs WHERE started>? AND status='confirmed'",
@@ -238,6 +281,7 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
         if request.app.state.telegram.lock(account_id).locked():
             raise HTTPException(409, "帐号正在执行请求，请完成后删除")
         db.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+        db.prune_groups()
         return {"ok": True}
 
     @app.get("/api/jobs")
@@ -257,7 +301,9 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
 
     @app.put("/api/jobs/{job_id}")
     async def job_update(job_id: int, data: Job, request: Request, session=Depends(auth), db=Depends(store)):
-        require_job(db, job_id)
+        job = require_job(db, job_id)
+        if job["group_id"] is not None:
+            raise HTTPException(409, "此任务属于集合，请通过集合统一编辑")
         require_account(db, data.account_id)
         if job_id in request.app.state.runner.tasks:
             raise HTTPException(409, "任务正在执行，请完成后编辑")
@@ -265,6 +311,32 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
         fields["next_run"] = next_time(data.cron, data.timezone)
         db.execute(f"UPDATE jobs SET {','.join(key+'=?' for key in fields)} WHERE id=?",
                    (*fields.values(), job_id))
+        return {"ok": True}
+
+    @app.post("/api/jobs/batch")
+    async def job_create_batch(data: BatchJob, session=Depends(auth), db=Depends(store)):
+        return save_group(db, data)
+
+    @app.put("/api/job-groups/{group_id}")
+    async def group_update(group_id: int, data: BatchJob, request: Request, session=Depends(auth), db=Depends(store)):
+        members = require_group(db, group_id)
+        if any(j["id"] in request.app.state.runner.tasks for j in members):
+            raise HTTPException(409, "集合中有任务正在执行，请完成后编辑")
+        return save_group(db, data, group_id)
+
+    @app.patch("/api/job-groups/{group_id}")
+    async def group_toggle(group_id: int, data: Toggle, session=Depends(auth), db=Depends(store)):
+        members = require_group(db, group_id)
+        db.execute("UPDATE jobs SET enabled=?,next_run=? WHERE group_id=?",
+                   (data.enabled, next_time(members[0]["cron"], members[0]["timezone"]), group_id))
+        return {"ok": True}
+
+    @app.delete("/api/job-groups/{group_id}")
+    async def group_delete(group_id: int, request: Request, session=Depends(auth), db=Depends(store)):
+        members = require_group(db, group_id)
+        if any(j["id"] in request.app.state.runner.tasks for j in members):
+            raise HTTPException(409, "集合中有任务正在执行，请完成后删除")
+        db.execute("DELETE FROM job_groups WHERE id=?", (group_id,))
         return {"ok": True}
 
     @app.patch("/api/jobs/{job_id}")
@@ -280,11 +352,16 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
         if job_id in request.app.state.runner.tasks:
             raise HTTPException(409, "任务正在执行，请完成后删除")
         db.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+        db.prune_groups()
         return {"ok": True}
 
     @app.post("/api/jobs/{job_id}/run")
     async def job_run(job_id: int, request: Request, session=Depends(auth), db=Depends(store)):
         job = require_job(db, job_id)
+        return {"run_id": launch_manual(db, request, job)}
+
+    def launch_manual(db, request, job):
+        job_id = job["id"]
         account = require_account(db, job["account_id"])
         if db.paused() or not job["enabled"] or not account["enabled"]:
             raise HTTPException(409, "请先启用全局调度、帐号及任务")
@@ -296,7 +373,20 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
         run_id = request.app.state.runner.launch(job, "manual")
         if run_id is None:
             raise HTTPException(409, "任务已在执行或帐号被禁用")
-        return {"run_id": run_id}
+        return run_id
+
+    @app.post("/api/job-groups/{group_id}/run")
+    async def group_run(group_id: int, request: Request, session=Depends(auth), db=Depends(store)):
+        results = []
+        for job in require_group(db, group_id):
+            account = require_account(db, job["account_id"])
+            item = {"job_id": job["id"], "account_name": account["name"]}
+            try:
+                item.update(status="started", run_id=launch_manual(db, request, job))
+            except HTTPException as exc:
+                item.update(status="skipped", detail=exc.detail)
+            results.append(item)
+        return {"started": sum(r["status"] == "started" for r in results), "results": results}
 
     @app.get("/api/runs")
     async def runs(limit: int = 100, session=Depends(auth), db=Depends(store)):

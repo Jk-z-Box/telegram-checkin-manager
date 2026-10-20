@@ -69,8 +69,12 @@ class Store:
           secret TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
           cooldown REAL NOT NULL DEFAULT 0, created REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS job_groups(
+          id INTEGER PRIMARY KEY, created REAL NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS jobs(
           id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          group_id INTEGER REFERENCES job_groups(id) ON DELETE CASCADE,
           name TEXT NOT NULL, target TEXT NOT NULL, message TEXT NOT NULL,
           cron TEXT NOT NULL, timezone TEXT NOT NULL, button TEXT NOT NULL DEFAULT '',
           success_text TEXT NOT NULL DEFAULT '', reply_timeout INTEGER NOT NULL DEFAULT 30,
@@ -89,6 +93,10 @@ class Store:
         );
         INSERT OR IGNORE INTO settings VALUES('paused','0');
         """)
+        # Existing installations keep their single-account tasks unchanged.
+        if "group_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}:
+            self.db.execute("ALTER TABLE jobs ADD COLUMN group_id INTEGER REFERENCES job_groups(id) ON DELETE CASCADE")
+        self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_group_account ON jobs(group_id,account_id)")
         self.db.commit()
 
     def config(self):
@@ -116,9 +124,13 @@ class Store:
         return self.one("SELECT value FROM settings WHERE key='paused'")["value"] == "1"
 
     def cleanup(self):
+        self.prune_groups()
         self.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
         self.execute("DELETE FROM runs WHERE started < ? AND status != 'running'",
                      (time.time() - 90 * 86400,))
+
+    def prune_groups(self):
+        self.execute("DELETE FROM job_groups WHERE NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.group_id=job_groups.id)")
 
     def close(self):
         self.db.close()

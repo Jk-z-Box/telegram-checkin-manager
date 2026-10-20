@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from apscheduler.triggers.cron import CronTrigger
@@ -47,8 +48,7 @@ class PasswordChange(BaseModel):
     new_password: str = Field(min_length=12, max_length=256)
 
 
-class Job(BaseModel):
-    account_id: int
+class JobFields(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     target: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1, max_length=4096)
@@ -73,3 +73,18 @@ class Job(BaseModel):
         except Exception as e:
             raise ValueError("Cron 或时区无效；Cron 使用五段格式，星期 0=周一、6=周日") from e
         return self
+
+
+class Job(JobFields):
+    account_id: int
+
+
+class BatchJob(JobFields):
+    account_ids: list[Annotated[int, Field(gt=0, strict=True)]] = Field(min_length=1, max_length=100)
+
+    @field_validator("account_ids")
+    @classmethod
+    def unique_accounts(cls, value):
+        if len(value) != len(set(value)):
+            raise ValueError("同一批任务不能重复选择帐号")
+        return value
