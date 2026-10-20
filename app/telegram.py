@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import re
 import secrets
 import time
 
@@ -11,6 +13,33 @@ class CheckinError(Exception):
     pass
 
 
+class LoginFailure(CheckinError):
+    """A credential-free diagnostic suitable for the Web UI and service logs."""
+
+    def __init__(self, stage, error):
+        self.stage = stage
+        self.error_type = type(error).__name__
+        self.reference = secrets.token_hex(4)
+        label = {
+            "initialize": "初始化登录客户端",
+            "connect": "连接 Telegram",
+            "send_code": "发送验证码",
+            "verify_code": "校验验证码",
+            "verify_password": "校验两步验证密码",
+            "read_account": "读取帐号信息",
+            "save_account": "保存帐号",
+        }[stage]
+        super().__init__(
+            f"{label}失败（{self.error_type}）：{login_error_message(error)}"
+            f"；诊断编号 {self.reference}，可用 tgc logs 查看"
+        )
+        # Never log the raw exception/traceback/request: they may contain credentials.
+        logging.getLogger(__name__).warning(
+            "Telegram login failed stage=%s error_type=%s reference=%s",
+            stage, self.error_type, self.reference,
+        )
+
+
 class TelegramService:
     def __init__(self, store):
         self.store = store
@@ -18,12 +47,16 @@ class TelegramService:
         self.locks = {}
         self.active = set()
 
-    def client(self, secret):
+    def client(self, secret, *, login=False):
         return TelegramClient(
             StringSession(secret.get("session", "")), secret["api_id"], secret["api_hash"],
-            flood_sleep_threshold=0, request_retries=0, connection_retries=2,
+            # Telethon consumes an attempt when switching Telegram DCs. Login must
+            # be able to continue after PHONE/NETWORK/USER_MIGRATE. Keep task sends
+            # on zero RPC retries, since their delivery may already have succeeded.
+            flood_sleep_threshold=0, request_retries=3 if login else 0,
+            raise_last_call_error=True, connection_retries=2,
             timeout=15, device_model="Checkin Manager", system_version="Linux",
-            app_version="1.0.0",
+            app_version="1.1.1",
         )
 
     async def prune(self):
@@ -37,19 +70,32 @@ class TelegramService:
         if len(self.pending) >= 5:
             raise CheckinError("最多同时进行 5 个登录，请完成或等待 5 分钟后重试")
         secret = data.model_dump()
-        client = self.client(secret)
+        client = None
+        stage = "initialize"
         try:
-            await client.connect()
-            sent = await client.send_code_request(data.phone)
+            client = self.client(secret, login=True)
+            self.active.add(client)
+            async with asyncio.timeout(55):
+                stage = "connect"
+                await client.connect()
+                stage = "send_code"
+                sent = await client.send_code_request(data.phone)
             ticket = secrets.token_urlsafe(24)
             self.pending[ticket] = {
                 "client": client, "secret": secret, "hash": sent.phone_code_hash,
                 "expires": time.time() + 300, "busy": False, "need_password": False,
             }
             return {"ticket": ticket, "expires_in": 300}
+        except Exception as exc:
+            if client:
+                await self.disconnect_login(client)
+            raise LoginFailure(stage, exc) from None
         except BaseException:
-            await client.disconnect()
+            if client:
+                await self.disconnect_login(client)
             raise
+        finally:
+            self.active.discard(client)
 
     async def finish(self, data):
         await self.prune()
@@ -60,6 +106,7 @@ class TelegramService:
             raise CheckinError("登录请求正在处理")
         item["busy"] = True
         client, secret = item["client"], item["secret"]
+        stage = "verify_password" if item["need_password"] else "verify_code"
         try:
             if item["need_password"]:
                 await client.sign_in(password=data.password)
@@ -70,7 +117,11 @@ class TelegramService:
                 except errors.SessionPasswordNeededError:
                     item["need_password"] = True
                     return {"need_password": True}
+            stage = "read_account"
             me = await client.get_me()
+            if me is None:
+                raise CheckinError("未取得已登录的帐号信息，请重新获取验证码")
+            stage = "save_account"
             secret["session"] = client.session.save()
             self.store.execute(
                 """INSERT INTO accounts(name,uid,secret,created) VALUES(?,?,?,?)
@@ -79,10 +130,19 @@ class TelegramService:
                 (secret["name"], me.id, self.store.encrypt(secret), time.time()),
             )
             self.pending.pop(data.ticket, None)
-            await client.disconnect()
+            await self.disconnect_login(client)
             return {"ok": True}
+        except Exception as exc:
+            raise LoginFailure(stage, exc) from None
         finally:
             item["busy"] = False
+
+    async def disconnect_login(self, client):
+        try:
+            await asyncio.wait_for(client.disconnect(), timeout=3)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Telegram login cleanup failed error_type=%s", type(exc).__name__)
 
     def lock(self, account_id):
         return self.locks.setdefault(account_id, asyncio.Lock())
@@ -183,9 +243,49 @@ class TelegramService:
         self.pending.clear()
 
 
-def friendly_error(exc):
+def login_error_message(exc):
+    """Classify known failures without returning exception text or request fields."""
     if isinstance(exc, CheckinError):
         return str(exc)
+    if isinstance(exc, errors.FloodWaitError):
+        return f"Telegram 要求等待 {exc.seconds} 秒，请等待后再获取验证码"
+    mapping = {
+        "ApiIdInvalidError": "API ID 或 API Hash 无效，请核对 my.telegram.org/apps 中同一应用的凭据",
+        "ApiIdPublishedFloodError": "这组 API 凭据已被 Telegram 限制，请检查你自己的应用凭据",
+        "PhoneNumberInvalidError": "Telegram 不接受这个手机号，请核对号码和国家代码",
+        "PhoneNumberBannedError": "此手机号被 Telegram 限制，请通过官方客户端确认帐号状态",
+        "PhoneNumberFloodError": "此手机号请求验证码过于频繁，请稍后重试",
+        "PhonePasswordFloodError": "此帐号登录尝试过于频繁，请稍后重试",
+        "SendCodeUnavailableError": "Telegram 当前没有可用的验证码发送方式，请稍后重试",
+        "PhoneCodeInvalidError": "验证码错误，请输入本次网页请求收到的验证码",
+        "PhoneCodeExpiredError": "验证码已过期，请重新获取",
+        "PhoneCodeEmptyError": "请输入验证码",
+        "PasswordHashInvalidError": "两步验证密码错误",
+        "AuthRestartError": "Telegram 要求重新开始登录，请稍后重新获取验证码",
+        "PhoneMigrateError": "Telegram 数据中心切换未完成，请稍后重新获取验证码",
+        "NetworkMigrateError": "Telegram 数据中心切换未完成，请稍后重新获取验证码",
+        "UserMigrateError": "Telegram 数据中心切换未完成，请稍后重新获取验证码",
+    }
+    if type(exc).__name__ in mapping:
+        return mapping[type(exc).__name__]
+    if isinstance(exc, (asyncio.TimeoutError, errors.TimedOutError)):
+        return "请求超时，请检查部署服务器到 Telegram 的网络连接"
+    if isinstance(exc, (ConnectionError, OSError)):
+        return "连接失败，请检查部署服务器到 Telegram 的网络连接"
+    if isinstance(exc, (errors.ServerError, errors.RpcCallFailError)):
+        return "Telegram 服务暂时未完成请求，请稍后重试"
+    if isinstance(exc, ValueError):
+        if re.fullmatch(r"Request was unsuccessful \d+ time\(s\)", str(exc)):
+            return "Telegram 请求未完成，请确认已更新程序并稍后重试"
+        return "登录参数或会话状态无效，请核对应用凭据并重新开始登录"
+    return "登录请求未完成，请根据错误类型和诊断编号检查服务"
+
+
+def friendly_error(exc, *, login=False):
+    if isinstance(exc, CheckinError):
+        return str(exc)
+    if login:
+        return f"登录请求未完成（{type(exc).__name__}）：{login_error_message(exc)}"
     if isinstance(exc, errors.FloodWaitError):
         return f"Telegram 要求等待 {exc.seconds} 秒；已暂停该帐号至冷却结束"
     mapping = {

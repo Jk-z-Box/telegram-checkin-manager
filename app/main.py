@@ -199,14 +199,14 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
         try:
             return await asyncio.wait_for(request.app.state.telegram.start(data), timeout=60)
         except Exception as exc:
-            raise HTTPException(400, friendly_error(exc))
+            raise HTTPException(400, friendly_error(exc, login=True))
 
     @app.post("/api/accounts/finish")
     async def account_finish(data: AccountFinish, request: Request, session=Depends(auth)):
         try:
             return await asyncio.wait_for(request.app.state.telegram.finish(data), timeout=60)
         except Exception as exc:
-            raise HTTPException(400, friendly_error(exc))
+            raise HTTPException(400, friendly_error(exc, login=True))
 
     @app.get("/api/accounts/{account_id}/dialogs")
     async def dialogs(account_id: int, request: Request, session=Depends(auth), db=Depends(store)):

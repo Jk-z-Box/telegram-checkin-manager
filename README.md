@@ -201,6 +201,19 @@ sudo tgcheckin start
 
 删除帐号会移除其本地会话和任务，但不会注销 Telegram 设备。如需撤销服务器登录，前往 Telegram「设置 → 设备」结束对应会话。
 
+## 连接帐号失败时
+
+旧版在发送验证码时可能显示 `请求未完成（ValueError）`。一个已复现的原因是：Telegram 要求切换数据中心，客户端完成切换后却没有剩余重试次数。`v1.1.1` 已为登录流程启用有限重试；签到消息仍不自动重发。
+
+执行 `tgc update` 更新后，刷新网页并重新获取验证码。新版会显示失败阶段、错误类型和诊断编号，运行 `tgc logs` 可以查找对应记录。诊断日志不记录手机号、API Hash、验证码、密码或会话内容。
+
+- `ApiIdInvalidError`：核对 `my.telegram.org/apps` 中同一个应用的 API ID 和 API Hash。
+- `PhoneCodeInvalidError` / `PhoneCodeExpiredError`：输入本次网页请求收到的验证码；过期后重新获取。
+- `FloodWaitError` 或手机号请求过于频繁：按提示等待，避免连续点击发送。
+- 连接阶段超时或网络错误：检查部署服务器到 Telegram 的网络连接；网页可以访问不代表服务器能够连接 Telegram。
+
+看到其他错误时，提供失败阶段、错误类型和诊断编号即可，无需公开任何凭据。
+
 ## 本地运行与开发
 
 ```bash
@@ -224,7 +237,7 @@ pip install -r requirements-dev.txt
 bash scripts/check.sh
 ```
 
-测试使用模拟 Telegram 客户端，覆盖认证、CSRF、加密、任务管理、调度、限流、备份与按钮处理。配置测试还覆盖安装向导、无效输入重填、保留旧密码、凭据修改后会话失效、快捷指令与服务状态保持；Shell 指令测试模拟 systemctl/runuser，不操作开发机服务。测试不向 Telegram 发送真实消息。Linux 安装脚本仍需要在实际 systemd 主机做安装验证；本地 macOS 开发测试不等于已通过 Linux 部署验收。
+测试使用模拟 Telegram 客户端或传输层，覆盖认证、CSRF、加密、任务管理、调度、限流、备份与按钮处理。登录回归测试通过真实 Telethon 请求处理验证数据中心切换与有限重试，并覆盖两步验证和错误脱敏。配置测试还覆盖安装向导、无效输入重填、保留旧密码、凭据修改后会话失效、快捷指令与服务状态保持；Shell 指令测试模拟 systemctl/runuser，不操作开发机服务。自动化测试不连接 Telegram。Linux 安装脚本仍需要在实际 systemd 主机做安装验证；本地 macOS 开发测试不等于已通过 Linux 部署验收。
 
 [deploy/github-actions-ci.example.yml](deploy/github-actions-ci.example.yml) 提供可选 CI 示例。拥有工作流写入权限后，将它放到 `.github/workflows/ci.yml` 即可启用；仓库默认不包含已启用的 Actions 工作流。
 
