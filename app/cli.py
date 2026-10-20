@@ -1,14 +1,15 @@
 import argparse
-import getpass
-import ipaddress
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 
 from .models import Job, next_time
 from .store import PASSWORDS, Store, data_dir, initialize, save_config
+from .configuration import (access_summary, ask, ask_password, validate_host,
+                            validate_port, validate_username, wizard)
 
 
 def main():
@@ -16,8 +17,21 @@ def main():
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init")
     sub.add_parser("serve")
-    sub.add_parser("reset-password")
-    sub.add_parser("config")
+    sub.add_parser("reset-password", aliases=["passwd"])
+    sub.add_parser("config", aliases=["setup"])
+    sub.add_parser("access")
+    port = sub.add_parser("port", help="修改 Web 端口")
+    port.add_argument("port", type=validate_port)
+    bind = sub.add_parser("bind", help="指定监听 IP，可附带端口")
+    bind.add_argument("host", type=validate_host)
+    bind.add_argument("port", nargs="?", type=validate_port)
+    for name in ("public", "local"):
+        command = sub.add_parser(name, help="监听所有 IPv4 网卡" if name == "public" else "仅监听本机")
+        command.add_argument("port", nargs="?", type=validate_port)
+    user = sub.add_parser("username", help="修改管理员用户名")
+    user.add_argument("username", nargs="?", type=validate_username)
+    sub.add_parser("enable", help="启用开机自启")
+    sub.add_parser("disable", help="关闭开机自启")
     sub.add_parser("status")
     sub.add_parser("pause")
     sub.add_parser("resume")
@@ -31,14 +45,12 @@ def main():
     args = parser.parse_args()
     path = data_dir()
     if args.cmd == "init":
-        username = input("管理员用户名 [admin]: ").strip() or "admin"
-        if len(username) > 64:
-            raise ValueError("用户名不能超过 64 字符")
-        password = getpass.getpass("管理员密码（至少 12 字符）: ")
-        if password != getpass.getpass("再次输入密码: "):
-            raise ValueError("两次密码不一致")
-        initialize(path, username, password)
-        print("初始化完成；请妥善备份 data 目录及 master.key")
+        if (path / "config.json").exists():
+            raise ValueError("已经初始化，请使用 config 修改配置")
+        config, password = wizard()
+        initialize(path, password=password, **config)
+        print(f"初始化完成；请妥善备份 {path} 目录及 master.key")
+        access_summary(config)
         return
     if not (path / "config.json").exists():
         raise ValueError("请先运行 python -m app.cli init")
@@ -52,12 +64,8 @@ def main():
         return menu()
     db = Store(path)
     try:
-        if args.cmd == "reset-password":
-            password = getpass.getpass("新管理员密码（至少 12 字符）: ")
-            if len(password) < 12 or len(password) > 256:
-                raise ValueError("密码长度必须为 12–256 字符")
-            if password != getpass.getpass("再次输入密码: "):
-                raise ValueError("两次密码不一致")
+        if args.cmd in ("reset-password", "passwd"):
+            password = ask_password()
             config = db.config()
             config["password_hash"] = PASSWORDS.hash(password)
             save_config(path, config)
@@ -67,27 +75,46 @@ def main():
             db.execute("UPDATE settings SET value=? WHERE key='paused'",
                        ("1" if args.cmd == "pause" else "0",))
             print("已暂停后续任务（已发出的消息无法撤回）" if args.cmd == "pause" else "已恢复调度")
-        elif args.cmd == "config":
-            config = db.config()
-            host = input(f"监听 IP [{config['host']}]: ").strip() or config["host"]
-            ipaddress.ip_address(host)
-            port = int(input(f"端口 [{config['port']}]: ").strip() or config["port"])
-            if not 1 <= port <= 65535:
-                raise ValueError("端口必须为 1–65535")
-            secure = input(f"仅 HTTPS Cookie? y/n [{'y' if config['secure_cookie'] else 'n'}]: ").strip().lower()
-            if secure not in ("", "y", "n"):
-                raise ValueError("请输入 y 或 n")
-            config.update(host=host, port=port)
-            if secure:
-                config["secure_cookie"] = secure == "y"
+        elif args.cmd in ("config", "setup", "port", "public", "local", "bind",
+                          "username", "enable", "disable"):
+            original = db.config()
+            config = original.copy()
+            password = None
+            if args.cmd in ("config", "setup"):
+                updates, password = wizard(config)
+                config.update(updates)
+            elif args.cmd in ("public", "local", "bind", "port"):
+                if args.cmd == "public":
+                    config["host"] = "0.0.0.0"
+                elif args.cmd == "local":
+                    config["host"] = "127.0.0.1"
+                elif args.cmd == "bind":
+                    config["host"] = args.host
+                if args.port is not None:
+                    config["port"] = args.port
+            elif args.cmd == "username":
+                config["username"] = args.username or ask("管理员用户名", config["username"], validate_username)
+            else:
+                config["autostart"] = args.cmd == "enable"
+            if password:
+                config["password_hash"] = PASSWORDS.hash(password)
             save_config(path, config)
-            print("已保存，请重启服务使监听配置生效")
+            if password or config["username"] != original["username"]:
+                db.execute("DELETE FROM sessions")
+                print("管理员凭据已更新，所有 Web 登录已失效")
+            print("配置已保存。安装版快捷指令会应用服务配置；手动运行时需重启服务。")
+            access_summary(config)
+        elif args.cmd == "access":
+            access_summary(db.config())
         elif args.cmd == "status":
             print(json.dumps({
                 "data": str(path), "paused": db.paused(),
                 "accounts": db.one("SELECT COUNT(*) n FROM accounts")["n"],
                 "jobs": db.one("SELECT COUNT(*) n FROM jobs")["n"],
                 "host": db.config()["host"], "port": db.config()["port"],
+                "username": db.config()["username"],
+                "secure_cookie": db.config()["secure_cookie"],
+                "autostart": db.config().get("autostart", True),
             }, ensure_ascii=False, indent=2))
         elif args.cmd == "list-jobs":
             for job in db.all("SELECT id,name,account_id,cron,timezone,enabled FROM jobs"):
@@ -120,41 +147,63 @@ def main():
 
 def menu():
     labels = [
-        ("查看服务状态", ["systemctl", "status", "tgcheckin", "--no-pager"]),
-        ("启动服务", ["systemctl", "start", "tgcheckin"]),
-        ("停止服务", ["systemctl", "stop", "tgcheckin"]),
-        ("重启服务", ["systemctl", "restart", "tgcheckin"]),
-        ("暂停全部签到", ["cli", "pause"]),
-        ("恢复全部签到", ["cli", "resume"]),
-        ("修改监听配置", ["cli", "config"]),
-        ("重置 Web 密码", ["cli", "reset-password"]),
-        ("查看任务", ["cli", "list-jobs"]),
-        ("开关指定任务", ["toggle"]),
-        ("查看服务日志", ["journalctl", "-u", "tgcheckin", "-n", "80", "--no-pager"]),
-        ("备份数据", ["backup"]),
-        ("从 GitHub 更新", ["update"]),
-        ("导入 JSON 任务", ["import"]),
-        ("查看应用状态", ["cli", "status"]),
+        ("查看服务状态", "service-status"),
+        ("启动服务", "start"),
+        ("停止服务", "stop"),
+        ("重启服务", "restart"),
+        ("暂停全部签到", "pause"),
+        ("恢复全部签到", "resume"),
+        ("完整配置向导", "config"),
+        ("重置 Web 密码", "passwd"),
+        ("查看任务", "list-jobs"),
+        ("开关指定任务", "toggle-job"),
+        ("查看服务日志", "logs"),
+        ("备份数据", "backup"),
+        ("从 GitHub 更新", "update"),
+        ("导入 JSON 任务", "import-jobs"),
+        ("查看应用状态", "status"),
+        ("修改管理员用户名", "username"),
+        ("修改端口", "port"),
+        ("切换为公网/局域网监听", "public"),
+        ("切换为仅本机监听", "local"),
+        ("开启开机自启", "enable"),
+        ("关闭开机自启", "disable"),
+        ("查看访问地址", "access"),
     ]
+    allowed = {command for _, command in labels} | {"bind", "setup", "reset-password", "help"}
     while True:
-        print("\nTelegram 签到管理\n" + "\n".join(f"{i}. {x[0]}" for i, x in enumerate(labels, 1)) + "\n0. 退出")
+        print("\nTelegram 签到管理 · 快捷入口：tgc\n" +
+              "\n".join(f"{i:2}. {label}  [tgc {command}]" for i, (label, command) in enumerate(labels, 1)) +
+              "\n 0. 退出 [q]\n可输入数字或快捷指令，例如：port 9090、public 9090、restart")
         choice = input("请选择: ").strip()
-        if choice == "0":
+        if choice.lower() in ("0", "q", "quit", "exit"):
             return
-        if not choice.isdigit() or not 1 <= int(choice) <= len(labels):
+        try:
+            if choice.isdigit() and 1 <= int(choice) <= len(labels):
+                args = [labels[int(choice)-1][1]]
+            else:
+                args = shlex.split(choice)
+                if args and args[0] in ("tgc", "tgcheckin"):
+                    args = args[1:]
+        except ValueError:
+            print("指令格式错误，请检查引号")
             continue
-        cmd = labels[int(choice)-1][1]
+        if not args or args[0] not in allowed:
+            print("未知选项，请输入菜单数字或列出的快捷指令")
+            continue
         installed = os.path.isfile("/usr/local/bin/tgcheckin")
         cli = ["/usr/local/bin/tgcheckin"] if installed else [sys.executable, "-m", "app.cli"]
-        if cmd[0] == "cli":
-            cmd = [*cli, *cmd[1:]]
-        elif cmd[0] == "toggle":
-            cmd = [*cli, "toggle-job",
-                   input("任务 ID: ").strip(), input("on / off: ").strip()]
-        elif cmd[0] == "import":
-            cmd = [*cli, "import-jobs", input("JSON 文件路径: ").strip()]
-        elif cmd[0] in ("backup", "update"):
-            cmd = ["/usr/local/bin/tgcheckin", cmd[0]]
+        if len(args) == 1:
+            if args[0] == "toggle-job":
+                args.extend([input("任务 ID: ").strip(), input("on / off: ").strip()])
+            elif args[0] == "import-jobs":
+                args.append(input("JSON 文件路径: ").strip())
+            elif args[0] == "port":
+                args.append(input("新端口（1–65535）: ").strip())
+        if not installed and args[0] in ("start", "stop", "restart", "service-status", "logs", "backup", "update", "help"):
+            print("此快捷指令需要 Linux 安装环境")
+            continue
+        cmd = [*cli, *args]
         try:
             subprocess.run(cmd, check=False)
         except FileNotFoundError:
@@ -165,6 +214,6 @@ if __name__ == "__main__":
     os.umask(0o077)
     try:
         main()
-    except (ValueError, KeyboardInterrupt) as exc:
+    except (ValueError, KeyboardInterrupt, EOFError) as exc:
         print(str(exc) or "已取消", file=sys.stderr)
         sys.exit(1)

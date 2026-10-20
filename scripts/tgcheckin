@@ -1,18 +1,78 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
+case "${1:-menu}" in
+  help|-h|--help)
+    cat <<'HELP'
+Telegram 签到管理 · tgc 与 tgcheckin 等效
+
+  tgc / tgc menu           打开管理菜单（数字或指令均可）
+  tgc start|stop|restart   启动 / 停止 / 重启服务
+  tgc service-status      查看 systemd 状态
+  tgc status              查看应用与配置摘要
+  tgc config / tgc setup  完整配置向导
+  tgc public [端口]       监听所有 IPv4 网卡，例如 tgc public 9090
+  tgc local [端口]        仅监听 127.0.0.1
+  tgc bind IP [端口]      监听指定 IPv4 / IPv6 地址
+  tgc port 端口           修改 Web 端口（1–65535）
+  tgc username [用户名]   修改管理员用户名
+  tgc passwd              交互修改密码（不通过命令参数传递密码）
+  tgc enable|disable      开启 / 关闭开机自启
+  tgc pause|resume        暂停 / 恢复签到调度
+  tgc list-jobs           查看任务
+  tgc toggle-job ID on|off 开关指定任务
+  tgc import-jobs 文件    导入 JSON 任务
+  tgc access              显示访问方式
+  tgc logs                查看最近的服务日志
+  tgc backup              备份数据
+  tgc update              从 GitHub 获取最新安装器并更新
+
+非 root 用户执行管理操作时会自动使用 sudo。
+config/setup/public/local/bind/port 会应用配置并重启正在运行的服务；
+已停止的服务保持停止，开机自启设置单独生效。
+HELP
+    exit 0 ;;
+esac
 if [[ $EUID -ne 0 ]]; then exec sudo /usr/local/bin/tgcheckin "$@"; fi
 ROOT=/opt/tgcheckin/current
 export TGCHECKIN_DATA=/var/lib/tgcheckin
 cd "$ROOT/app"
+app_cli() {
+  runuser -u tgcheckin -- "$ROOT/venv/bin/python" -m app.cli "$@"
+}
+apply_autostart() {
+  local enabled
+  enabled=$("$ROOT/venv/bin/python" -c '
+import json,os
+with open(os.environ["TGCHECKIN_DATA"]+"/config.json") as f:
+    print("enable" if json.load(f).get("autostart", True) else "disable")
+')
+  systemctl "$enabled" tgcheckin
+}
 case "${1:-menu}" in
   start|stop|restart) exec systemctl "$1" tgcheckin ;;
   service-status) exec systemctl status tgcheckin --no-pager ;;
   logs) exec journalctl -u tgcheckin -n 100 --no-pager ;;
-  update) exec bash "$ROOT/app/install.sh" ;;
+  update)
+    INSTALLER=$(mktemp)
+    trap 'rm -f -- "$INSTALLER"' EXIT
+    curl -fsSL https://raw.githubusercontent.com/Jk-z-Box/telegram-checkin-manager/main/install.sh -o "$INSTALLER"
+    bash "$INSTALLER" ;;
   backup)
     install -d -m 700 -o tgcheckin -g tgcheckin /var/backups/tgcheckin
     exec runuser -u tgcheckin -- "$ROOT/venv/bin/python" -m app.backup /var/backups/tgcheckin ;;
   menu) exec "$ROOT/venv/bin/python" -m app.cli menu ;;
+  config|setup|public|local|bind|port)
+    app_cli "$@"
+    apply_autostart
+    if systemctl is-active --quiet tgcheckin; then
+      systemctl restart tgcheckin
+      echo "服务已重启；可运行 tgc service-status 查看状态。"
+    else
+      echo "服务当前未运行；配置已保存，运行 tgc start 启动。"
+    fi ;;
+  enable|disable)
+    app_cli "$@"
+    apply_autostart ;;
   *) exec runuser -u tgcheckin -- "$ROOT/venv/bin/python" -m app.cli "$@" ;;
 esac

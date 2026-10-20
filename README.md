@@ -27,17 +27,27 @@ curl -fsSL https://raw.githubusercontent.com/Jk-z-Box/telegram-checkin-manager/m
 curl -fsSL https://raw.githubusercontent.com/Jk-z-Box/telegram-checkin-manager/main/install.sh | bash
 ```
 
-安装时在终端设置管理员用户名与密码（至少 12 字符，不回显）。没有预置密码。安装器需要交互式终端完成这一步，不能在无终端的 CI 管道中首次初始化。
+首次安装会显示交互配置向导，依次设置：
+
+1. **监听方式**：仅本机 `127.0.0.1`、公网/局域网 `0.0.0.0`，或者自定义 IPv4/IPv6 地址。
+2. **Web 端口**：可自定义 `1–65535`，默认 `8080`。安装的 systemd 服务允许非 root 服务帐号绑定低端口。
+3. **HTTPS Cookie**：是否只允许经 HTTPS 登录，默认关闭；开启前需要自行配置 HTTPS 反向代理。
+4. **开机自启**：默认开启。关闭后仍会启动本次安装的服务，只是不随下次系统启动。
+5. **管理员用户名和密码**：用户名默认 `admin`，密码至少 12 字符、不回显、没有预置密码。
+
+直接回车采用方括号内的默认值，输入无效时会提示重新填写。所有配置填写完成后才保存。安装器通过 `/dev/tty` 读取交互输入，因此支持上面的 `curl | sudo bash`，首次初始化需要真实终端。
 
 安装完成后：
 
 ```bash
-sudo tgcheckin
+tgc
 ```
 
-打开中文管理菜单。默认 Web 监听 `127.0.0.1:8080`，避免将 Telegram 登录入口直接暴露在公网 HTTP 上。
+即可打开中文管理菜单；`tgcheckin` 仍然有效，普通用户会自动调用 sudo。安装器会创建 `/usr/local/bin/tgc` 快捷入口；如果已有其他同名文件，会保留它并提示使用 `tgcheckin`。
 
-在你自己的电脑建立 SSH 隧道：
+安装结束会根据实际配置显示访问方式。选择公网/局域网时，打开 `http://服务器IP:自定义端口`；是否能从外部访问还取决于服务器路由、防火墙和云安全组。安装器不会自动修改防火墙或配置 TLS。公网使用建议配置 HTTPS。
+
+如果选择默认的仅本机监听，在你自己的电脑建立 SSH 隧道：
 
 ```bash
 ssh -N -L 8080:127.0.0.1:8080 用户名@服务器IP
@@ -45,11 +55,19 @@ ssh -N -L 8080:127.0.0.1:8080 用户名@服务器IP
 
 然后打开 **http://127.0.0.1:8080**。如果电脑的 8080 被占用，把上面第一个 `8080` 改为 `18080`，访问 `http://127.0.0.1:18080`。
 
+如果设置了其他服务端口，将 SSH 命令中的第二个 `8080` 改为该端口。也可以运行 `tgc access` 查看按当前配置生成的访问提示。
+
+### 已安装用户更新
+
+从 `v1.0.0` 升级时，重新执行上面的一键部署命令，就能同时更新安装器、systemd 配置和 `tgc` 快捷入口。更新会保留原有用户名、密码、监听配置和任务；然后运行 `tgc config` 调整配置。
+
+从 `v1.1.0` 开始，也可以直接执行 `tgc update`，它会获取最新安装器再更新。
+
 ### 用 HTTPS 域名访问
 
 1. 配置域名 DNS，安装 Caddy，并将 [deploy/Caddyfile.example](deploy/Caddyfile.example) 中的域名替换成自己的域名。
 2. Caddy 将 HTTPS 转发到 `127.0.0.1:8080`；保持应用监听本机即可。
-3. 运行 `sudo tgcheckin config`，把「仅 HTTPS Cookie」设为 `y`，然后 `sudo tgcheckin restart`。
+3. 运行 `tgc config`，把「仅允许通过 HTTPS 登录」设为 `y`，其他选项按需填写或回车保留。正在运行的服务会自动重启应用配置。
 4. 打开自己的 HTTPS 域名登录。
 
 启用 Secure Cookie 后不能再通过普通 HTTP 登录。反向代理必须保留原始 Host，并传递正确的 `X-Forwarded-Proto`；只信任来自本机的代理头。默认 Caddy 反向代理满足这一配置。
@@ -104,25 +122,41 @@ ssh -N -L 8080:127.0.0.1:8080 用户名@服务器IP
 
 调度提前保存下一次时间，运行中断记为「结果未知」，**不自动重发**。停机后最多执行 60 秒以内的迟到计划，超过此窗口直接推进到下一次；暂停期间也不积压补发。已发出的消息不能通过暂停撤回。系统不承诺跨网络故障的“恰好一次”投递。
 
-## 命令行
+## 命令行快捷指令
 
 ```bash
-sudo tgcheckin                    # 中文交互菜单
-sudo tgcheckin start              # 启动服务
-sudo tgcheckin stop               # 停止服务
-sudo tgcheckin restart            # 重启服务
-sudo tgcheckin service-status     # systemd 状态
-sudo tgcheckin status             # 应用配置摘要
-sudo tgcheckin pause              # 暂停全部后续任务
-sudo tgcheckin resume             # 恢复调度
-sudo tgcheckin config             # 修改监听 IP、端口、Secure Cookie
-sudo tgcheckin reset-password     # 修改 Web 密码并退出所有会话
-sudo tgcheckin list-jobs          # 查看任务与帐号 ID
-sudo tgcheckin toggle-job 1 off   # 关闭任务 1；on 为开启
-sudo tgcheckin logs               # 查看服务日志
-sudo tgcheckin backup             # 一致性数据库备份
-sudo tgcheckin update             # 备份后更新，启动失败自动回滚代码
+tgc                        # 中文交互菜单
+tgc help                   # 列出快捷指令，无需提权
+tgc start                  # 启动服务
+tgc stop                   # 停止服务
+tgc restart                # 重启服务
+tgc service-status         # systemd 状态
+tgc status                 # 应用配置摘要
+tgc config                 # 完整配置向导（setup 等效）
+tgc public 9090            # 监听所有 IPv4 网卡，端口 9090
+tgc local 8080             # 仅监听本机，端口 8080
+tgc public                 # 切换到公网/局域网，保留当前端口
+tgc bind ::1 8080          # 指定 IPv6 地址和端口
+tgc port 8088              # 只修改端口
+tgc username myadmin       # 修改用户名，清除所有 Web 登录
+tgc passwd                 # 交互修改密码，清除所有 Web 登录
+tgc enable                 # 开启开机自启
+tgc disable                # 关闭开机自启，不停止当前服务
+tgc pause                  # 暂停全部后续签到
+tgc resume                 # 恢复签到调度
+tgc list-jobs              # 查看任务与帐号 ID
+tgc toggle-job 1 off        # 关闭任务 1；on 为开启
+tgc access                 # 显示当前监听和访问方式
+tgc logs                   # 查看服务日志
+tgc backup                 # 一致性数据库备份
+tgc update                 # 备份后更新，启动失败自动回滚代码
 ```
+
+`tgc` 与 `tgcheckin` 完全等效。菜单既支持数字选择，也支持直接输入指令，例如 `port 9090`、`public 9090`、`restart`；输入 `q` 或 `0` 退出。
+
+`config/setup/public/local/bind/port` 保存后会应用开机自启配置，并重启**正在运行**的服务；若服务已停止，则保持停止，稍后用 `tgc start` 启动。更改绑定地址或端口后，需要使用新地址访问 Web。`enable/disable` 只改变开机自启状态，`pause/resume` 只改变签到调度，不停止 Web。
+
+`config` 向导修改已有配置时，回车保留当前值；新密码留空也会保留原密码。`passwd` 和 `username` 可单独修改凭据，无需重启服务。密码只通过不回显的交互提示输入，不支持明文密码命令行参数。
 
 任务详细配置通过 Web 编辑，也可参照 [example.jobs.json](example.jobs.json) 批量新增：
 
@@ -179,7 +213,9 @@ python -m app.cli init
 python -m app.cli serve
 ```
 
-默认数据目录为当前目录的 `data/`。可通过 `TGCHECKIN_DATA=/绝对路径` 改写。只运行一个应用进程；不要使用多个 Uvicorn workers，目录锁会拒绝第二个服务进程。
+默认数据目录为当前目录的 `data/`。可通过 `TGCHECKIN_DATA=/绝对路径` 改写。`python -m app.cli init` 同样使用配置向导；配置子命令也可通过 `python -m app.cli port 9090` 等方式使用，但手动运行时需要自行重启进程。只有 Linux 安装器创建的 systemd 服务配置了绑定低端口的能力，普通用户手动运行建议使用 1024 以上端口。
+
+只运行一个应用进程；不要使用多个 Uvicorn workers，目录锁会拒绝第二个服务进程。
 
 测试：
 
@@ -188,7 +224,7 @@ pip install -r requirements-dev.txt
 bash scripts/check.sh
 ```
 
-测试使用模拟 Telegram 客户端，覆盖认证、CSRF、加密、任务管理、调度、限流、备份与按钮处理。它们不向 Telegram 发送真实消息。Linux 安装脚本需要在实际 systemd 主机做安装验证；本地 macOS 开发测试不等于已通过 Linux 部署验收。
+测试使用模拟 Telegram 客户端，覆盖认证、CSRF、加密、任务管理、调度、限流、备份与按钮处理。配置测试还覆盖安装向导、无效输入重填、保留旧密码、凭据修改后会话失效、快捷指令与服务状态保持；Shell 指令测试模拟 systemctl/runuser，不操作开发机服务。测试不向 Telegram 发送真实消息。Linux 安装脚本仍需要在实际 systemd 主机做安装验证；本地 macOS 开发测试不等于已通过 Linux 部署验收。
 
 [deploy/github-actions-ci.example.yml](deploy/github-actions-ci.example.yml) 提供可选 CI 示例。拥有工作流写入权限后，将它放到 `.github/workflows/ci.yml` 即可启用；仓库默认不包含已启用的 Actions 工作流。
 

@@ -48,6 +48,11 @@ cleanup() {
     if [[ $SWITCHED == 1 && -n "$PREVIOUS" ]]; then
       ln -sfn "$PREVIOUS" "$ROOT/rollback-link"
       mv -Tf "$ROOT/rollback-link" "$ROOT/current"
+      install -m 755 "$PREVIOUS/app/scripts/tgcheckin" /usr/local/bin/tgcheckin
+      if [[ -f "$STAGING/service.previous" ]]; then
+        install -m 644 "$STAGING/service.previous" /etc/systemd/system/tgcheckin.service
+        systemctl daemon-reload
+      fi
       systemctl restart tgcheckin || true
       echo "已恢复到此前版本。"
     elif [[ $NEW_SERVICE == 1 ]]; then
@@ -75,15 +80,19 @@ chmod -R go-w "$RELEASE"
 export TGCHECKIN_DATA="$DATA"
 cd "$RELEASE/app"
 if [[ ! -f "$DATA/config.json" ]]; then
-  echo "→ 创建 Web 管理员（密码不会回显）"
+  echo "→ 配置监听方式、端口、Web 管理员及开机自启（密码不会回显）"
   "$RELEASE/venv/bin/python" -m app.cli init </dev/tty
 elif [[ -n "$PREVIOUS" ]]; then
   install -d -m 700 -o tgcheckin -g tgcheckin /var/backups/tgcheckin
   runuser -u tgcheckin -- "$PREVIOUS/venv/bin/python" -m app.backup /var/backups/tgcheckin
+  echo "→ 保留现有配置；更新完成后可运行 tgc config 重新设置"
 fi
 chown -R tgcheckin:tgcheckin "$DATA"
 chmod 700 "$DATA"
 find "$DATA" -type f -exec chmod 600 {} +
+if [[ -f /etc/systemd/system/tgcheckin.service ]]; then
+  cp /etc/systemd/system/tgcheckin.service "$STAGING/service.previous"
+fi
 
 cat > /etc/systemd/system/tgcheckin.service <<'UNIT'
 [Unit]
@@ -106,6 +115,8 @@ RestartSec=5
 TimeoutStopSec=30
 UMask=0077
 NoNewPrivileges=true
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
@@ -119,12 +130,23 @@ ProtectControlGroups=true
 WantedBy=multi-user.target
 UNIT
 install -m 755 "$RELEASE/app/scripts/tgcheckin" /usr/local/bin/tgcheckin
+SHORTCUT_INSTALLED=0
+if [[ ! -e /usr/local/bin/tgc && ! -L /usr/local/bin/tgc ]] ||
+   [[ "$(readlink /usr/local/bin/tgc 2>/dev/null || true)" == /usr/local/bin/tgcheckin ]]; then
+  ln -sfn /usr/local/bin/tgcheckin /usr/local/bin/tgc
+  SHORTCUT_INSTALLED=1
+fi
 ln -sfn "$RELEASE" "$ROOT/next-link"
 mv -Tf "$ROOT/next-link" "$ROOT/current"
 SWITCHED=1
 [[ -n "$PREVIOUS" ]] || NEW_SERVICE=1
 systemctl daemon-reload
-systemctl enable tgcheckin
+AUTOSTART=$("$RELEASE/venv/bin/python" -c '
+import json,os
+with open(os.environ["TGCHECKIN_DATA"]+"/config.json") as f:
+    print("enable" if json.load(f).get("autostart", True) else "disable")
+')
+systemctl "$AUTOSTART" tgcheckin
 systemctl restart tgcheckin
 ADDRESS=$("$RELEASE/venv/bin/python" -c '
 import json,os
@@ -137,10 +159,10 @@ echo "→ 等待服务启动"
 for attempt in $(seq 1 20); do
   if curl --noproxy '*' -fsS "http://$ADDRESS/healthz" >/dev/null; then
     echo "安装成功（版本 $REVISION）"
-    echo "Web 地址：http://$ADDRESS"
-    echo "管理菜单：sudo tgcheckin"
-    echo "默认只监听本机。远程使用：ssh -L 8080:127.0.0.1:8080 用户名@服务器"
-    echo "然后在你的电脑打开 http://127.0.0.1:8080"
+    runuser -u tgcheckin -- "$RELEASE/venv/bin/python" -m app.cli access
+    if [[ $SHORTCUT_INSTALLED == 0 ]]; then
+      echo "已有同名 /usr/local/bin/tgc，未覆盖；请使用 tgcheckin 管理。"
+    fi
     exit 0
   fi
   sleep 1

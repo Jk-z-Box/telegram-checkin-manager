@@ -1,0 +1,112 @@
+"""Shared validation and interactive deployment configuration."""
+import getpass
+import ipaddress
+
+
+def validate_host(value):
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except ValueError as exc:
+        raise ValueError("请输入有效的 IPv4 或 IPv6 地址") from exc
+    if address.is_multicast or str(address) == "255.255.255.255":
+        raise ValueError("不能监听组播或广播地址")
+    return str(address)
+
+
+def validate_port(value):
+    try:
+        port = int(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("端口必须为 1–65535 的整数") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("端口必须为 1–65535 的整数")
+    return port
+
+
+def validate_username(value):
+    value = value.strip()
+    if not 1 <= len(value) <= 64 or any(c.isspace() or not c.isprintable() for c in value):
+        raise ValueError("用户名须为 1–64 个可见字符，不能包含空白")
+    return value
+
+
+def ask(prompt, default, validator=lambda value: value):
+    while True:
+        value = input(f"{prompt} [{default}]: ").strip() or str(default)
+        try:
+            return validator(value)
+        except ValueError as exc:
+            print(exc)
+
+
+def yes_no(prompt, default):
+    def parse(value):
+        if value.lower() not in ("y", "n", "yes", "no"):
+            raise ValueError("请输入 y 或 n")
+        return value.lower() in ("y", "yes")
+    return ask(prompt, "y" if default else "n", parse)
+
+
+def ask_password(optional=False):
+    while True:
+        hint = "新密码（至少 12 字符，直接回车保留）: " if optional else "管理员密码（至少 12 字符）: "
+        password = getpass.getpass(hint)
+        if optional and not password:
+            return None
+        if not 12 <= len(password) <= 256:
+            print("密码长度必须为 12–256 字符")
+            continue
+        if password != getpass.getpass("再次输入密码: "):
+            print("两次密码不一致，请重新输入")
+            continue
+        return password
+
+
+def wizard(current=None):
+    current = current or {}
+    host = current.get("host", "127.0.0.1")
+    default_mode = "1" if host == "127.0.0.1" else "2" if host == "0.0.0.0" else "3"
+    print("\n部署配置（直接回车使用方括号中的值）")
+    print("1. 仅本机：127.0.0.1，适合 SSH 隧道或本机反向代理")
+    print("2. 公网/局域网：0.0.0.0，监听所有 IPv4 网卡")
+    print("3. 自定义 IP：指定网卡地址，支持 IPv6")
+
+    def mode(value):
+        if value not in ("1", "2", "3"):
+            raise ValueError("请选择 1、2 或 3")
+        return value
+
+    selected = ask("监听方式", default_mode, mode)
+    host = {"1": "127.0.0.1", "2": "0.0.0.0"}.get(selected, host)
+    if selected == "3":
+        host = ask("监听 IP", host, validate_host)
+    port = ask("Web 端口", current.get("port", 8080), validate_port)
+    print("HTTPS Cookie 需要已配置 HTTPS 反向代理；应用本身提供 HTTP。")
+    secure = yes_no("仅允许通过 HTTPS 登录", current.get("secure_cookie", False))
+    autostart = yes_no("服务开机自启", current.get("autostart", True))
+    username = ask("管理员用户名", current.get("username", "admin"), validate_username)
+    password = ask_password(optional=bool(current))
+    return {"host": host, "port": port, "secure_cookie": secure,
+            "autostart": autostart, "username": username}, password
+
+
+def access_summary(config):
+    host, port = config["host"], config["port"]
+    address = ipaddress.ip_address(host)
+    print(f"监听地址：{host}    端口：{port}")
+    print(f"管理员：{config['username']}    开机自启：{'是' if config.get('autostart', True) else '否'}")
+    if config["secure_cookie"]:
+        print("访问方式：打开已配置的 HTTPS 反向代理域名；普通 HTTP 无法登录。")
+    else:
+        if address.is_unspecified:
+            print(f"Web 地址：http://服务器IP:{port}")
+        else:
+            url_host = f"[{host}]" if address.version == 6 else host
+            print(f"Web 地址：http://{url_host}:{port}")
+        if address.is_loopback:
+            remote = f"[{host}]" if address.version == 6 else host
+            print(f"远程访问：ssh -N -L 18080:{remote}:{port} 用户名@服务器")
+            print("然后在你的电脑打开 http://127.0.0.1:18080")
+    if not address.is_loopback:
+        print(f"远程访问还取决于路由、防火墙和云安全组；需要放行 TCP {port}。")
+    print("管理菜单：tgc（也可使用 tgcheckin）    快捷指令：tgc help")
