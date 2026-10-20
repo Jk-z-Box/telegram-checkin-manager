@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>签到工作台 · Telegram Check-in</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<section id="login-view" class="login-view">
+  <div class="login-story">
+    <div class="brand"><span class="brand-mark">↗</span> CHECKIN<span class="brand-tag">TELEGRAM</span></div>
+    <div class="story-copy"><span class="eyebrow">YOUR DAILY ROUTINE, AUTOMATED</span>
+      <h1>每天的签到，<br>交给工作台。</h1>
+      <p>把多个帐号、多个对话的日常签到放在一起。<br>一次设定，按时执行，每一步都有迹可循。</p>
+      <div class="orbit"><span class="orbit-center">↗</span><span class="orbit-one">09:00 <b>已发送</b></span><span class="orbit-two">✓ <b>回复已确认</b></span><span class="orbit-three">◷ <b>明天继续</b></span></div>
+    </div>
+    <div class="story-foot"><span class="dot"></span> 自托管 · 帐号会话加密存储</div>
+  </div>
+  <div class="login-side">
+    <form id="login-form" class="login-card">
+      <span class="eyebrow">WELCOME BACK</span><h2>登录工作台</h2>
+      <p class="muted">使用部署时设置的管理员帐号。</p>
+      <label>用户名<input name="username" autocomplete="username" required maxlength="64" placeholder="admin"></label>
+      <label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="256" placeholder="输入管理员密码"></label>
+      <div id="login-error" class="form-error" role="alert"></div>
+      <button class="primary wide" type="submit">进入工作台 <span>→</span></button>
+      <p class="login-hint">忘记密码？在服务器运行 <code>sudo tgcheckin reset-password</code></p>
+    </form>
+  </div>
+</section>
+<div id="app-view" class="app-layout" hidden>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">↗</span> CHECKIN</div>
+    <span class="nav-label">工作空间</span>
+    <nav aria-label="主导航">
+      <button class="nav-item active" data-page="tasks"><span>▦</span>签到任务 <i id="nav-count">0</i></button>
+      <button class="nav-item" data-page="accounts"><span>◎</span>Telegram 帐号</button>
+      <button class="nav-item" data-page="logs"><span>↺</span>执行记录</button>
+      <button class="nav-item" data-page="settings"><span>⚙</span>安全设置</button>
+    </nav>
+    <div class="sidebar-bottom"><div class="local-note"><span class="dot"></span> 你的服务器，你的数据<p>会话加密 · 独立任务 · 自动调度</p></div>
+      <button id="logout" class="user-menu"><span class="avatar">A</span><span id="username">管理员</span><span class="logout-text">退出 ↗</span></button>
+    </div>
+  </aside>
+  <main>
+    <header class="topbar"><span id="breadcrumb">工作空间 / 签到任务</span><div><span id="connection" class="connection"><span class="dot"></span> 已连接</span><time id="clock"></time><button id="mobile-logout" class="text-button">退出</button></div></header>
+    <div class="main-content">
+      <div id="global-error" class="banner" role="alert" hidden></div>
+      <section id="page-tasks" class="page">
+        <div class="page-heading"><div><span class="eyebrow">AUTOMATION OVERVIEW</span><h1>签到工作台<span class="heading-dot">.</span></h1><p class="muted">让日常自动发生，把时间留给更重要的事。</p></div><button class="primary" id="new-job">＋ 新建任务</button></div>
+        <div class="stats">
+          <article><span class="stat-label">已连接帐号 <span>◎</span></span><strong id="stat-accounts">—</strong><small>集中管理你的 Telegram 帐号</small></article>
+          <article><span class="stat-label">已启用任务 <span>↗</span></span><strong id="stat-jobs">—</strong><small>每个任务独立安排执行时间</small></article>
+          <article><span class="stat-label">近 24 小时执行 <span>◷</span></span><strong id="stat-runs">—</strong><small>包含自动调度与手动执行</small></article>
+          <article class="accent-stat"><span class="stat-label">成功回复已确认 <span>✓</span></span><strong id="stat-confirmed">—</strong><small>近 24 小时匹配到成功文本</small></article>
+        </div>
+        <div class="schedule-strip"><div class="schedule-icon">◷</div><div><b id="schedule-label">自动调度运行中</b><p id="schedule-detail">按各任务的时区和计划自动执行。</p></div><button id="pause-all" class="secondary">暂停全部</button></div>
+        <section class="panel"><div class="panel-head"><div><h2>所有签到任务 <span id="job-count" class="count">0</span></h2><p>为不同对话设置消息、计划和回复校验。</p></div><label class="search-label"><span>⌕</span><input id="search" aria-label="搜索任务" placeholder="搜索任务或对话…"></label></div>
+          <div class="table-scroll"><table><thead><tr><th>任务 / 目标对话</th><th>关联帐号</th><th>执行计划</th><th>状态</th><th class="right">操作</th></tr></thead><tbody id="jobs-body"></tbody></table></div>
+          <div id="jobs-empty" class="empty" hidden><span>↗</span><h3>从第一个签到任务开始</h3><p>先连接 Telegram 帐号，再为目标对话设置签到消息。</p><button id="empty-start" class="secondary">连接帐号 →</button></div>
+          <div class="panel-footer">计划使用任务各自的时区 · 服务停机超过 60 秒的过期任务不补发<span>记录保留 90 天</span></div>
+        </section>
+      </section>
+      <section id="page-accounts" class="page" hidden><div class="page-heading"><div><span class="eyebrow">CONNECTED ACCOUNTS</span><h1>Telegram 帐号<span class="heading-dot">.</span></h1><p class="muted">每个帐号独立登录，登录会话加密保存在服务器。</p></div><button class="primary" id="new-account">＋ 连接帐号</button></div><div id="accounts-grid" class="accounts-grid"></div>
+        <div class="info-note">在 <a href="https://my.telegram.org/apps" target="_blank" rel="noreferrer">my.telegram.org/apps ↗</a> 获取 API ID 和 API Hash。验证码通常发送到 Telegram 官方服务对话；开启两步验证的帐号还需要输入密码。删除帐号只移除本地数据；如需撤销会话，请在 Telegram「设置 → 设备」中操作。</div>
+      </section>
+      <section id="page-logs" class="page" hidden><div class="page-heading"><div><span class="eyebrow">ACTIVITY HISTORY</span><h1>每次执行，都有记录<span class="heading-dot">.</span></h1><p class="muted">“已发送”表示消息已提交；“已确认”表示匹配到了指定成功回复。</p></div><button id="refresh-logs" class="secondary">↻ 刷新记录</button></div><section class="panel"><div class="table-scroll"><table><thead><tr><th>开始时间</th><th>任务 / 帐号</th><th>结果</th><th>说明</th></tr></thead><tbody id="logs-body"></tbody></table></div><div id="logs-empty" class="empty" hidden><span>↺</span><h3>还没有执行记录</h3><p>任务首次执行后，会在这里显示结果。</p></div></section></section>
+      <section id="page-settings" class="page" hidden><div class="page-heading"><div><span class="eyebrow">SECURITY & ACCESS</span><h1>安全设置<span class="heading-dot">.</span></h1><p class="muted">管理工作台的访问密码。</p></div></div><form id="password-form" class="panel settings-panel"><h2>修改管理员密码</h2><p class="muted">修改后所有已登录浏览器都需要重新登录。</p><label>当前密码<input name="current_password" type="password" required autocomplete="current-password"></label><label>新密码<input name="new_password" type="password" minlength="12" maxlength="256" required autocomplete="new-password" placeholder="至少 12 个字符"></label><label>确认新密码<input name="confirm" type="password" minlength="12" required autocomplete="new-password"></label><button class="primary" type="submit">更新密码</button></form><div class="info-note">监听地址、端口、HTTPS Cookie、服务启停与数据备份，可在服务器通过 <code>sudo tgcheckin</code> 管理。</div></section>
+      <footer class="main-footer"><span>CHECKIN / TELEGRAM AUTOMATION</span><span>Self-hosted. Yours.</span></footer>
+    </div>
+  </main>
+</div>
+<dialog id="job-dialog"><form id="job-form"><div class="modal-head"><div><span class="eyebrow">CHECK-IN TASK</span><h2 id="job-title">新建签到任务</h2></div><button class="icon-button close-modal" type="button" aria-label="关闭">×</button></div>
+  <input name="id" type="hidden"><label>任务名称<input name="name" required maxlength="100" placeholder="例如：每日积分签到"></label>
+  <label>Telegram 帐号<select name="account_id" id="job-account" required></select></label>
+  <label>目标对话<div class="input-row"><input name="target" required maxlength="128" placeholder="@bot_username 或 -100… 对话 ID"><button class="secondary" type="button" id="load-dialogs">选择对话</button></div></label><select id="dialog-options" aria-label="可用对话" hidden><option value="">选择已加入的对话</option></select>
+  <label>签到消息<textarea name="message" required maxlength="4096" rows="3" placeholder="/checkin"></textarea></label>
+  <div class="form-grid"><label>Cron 计划<input name="cron" required value="0 9 * * *" placeholder="0 9 * * *"></label><label>时区<input name="timezone" required value="Asia/Shanghai" placeholder="Asia/Shanghai"></label></div>
+  <p class="field-help">五段格式：分 时 日 月 星期；星期 0=周一、6=周日，可写 mon–sun。默认每天 09:00。</p>
+  <details><summary>按钮与回复校验（可选）</summary><label>要点击的按钮文字<input name="button" maxlength="100" placeholder="例如：签到（完全匹配）"></label><label>成功回复包含的文本<input name="success_text" maxlength="200" placeholder="例如：签到成功"></label><label>等待回复超时（秒）<input name="reply_timeout" type="number" min="5" max="120" value="30"></label><p class="field-help">只点击文本 / 回调按钮，不打开外部链接。群组中只接受回复本次签到消息的结果；验证码和多步交互需要手动处理。</p></details>
+  <label class="checkbox"><input name="enabled" type="checkbox" checked>保存后启用任务</label><div class="modal-error form-error" role="alert"></div><div class="modal-actions"><button class="secondary close-modal" type="button">取消</button><button class="primary" type="submit">保存任务</button></div>
+</form></dialog>
+<dialog id="account-dialog"><form id="account-form"><div class="modal-head"><div><span class="eyebrow">CONNECT TELEGRAM</span><h2>连接 Telegram 帐号</h2></div><button class="icon-button close-modal" type="button" aria-label="关闭">×</button></div>
+  <div id="account-step-start"><p class="muted">用你自己的 Telegram API 凭据登录。</p><label>帐号备注<input name="name" required maxlength="80" placeholder="例如：主帐号"></label><div class="form-grid"><label>API ID<input name="api_id" required type="number" min="1" max="2147483647"></label><label>API Hash<input name="api_hash" type="password" required pattern="[a-fA-F0-9]{32}" autocomplete="off"></label></div><label>手机号（包含国家代码）<input name="phone" required type="tel" placeholder="+8613800000000" pattern="\+[1-9][0-9]{6,14}" autocomplete="tel"></label><p class="field-help">凭据来自 <a href="https://my.telegram.org/apps" target="_blank" rel="noreferrer">my.telegram.org/apps ↗</a>，并非 Bot Token。</p></div>
+  <div id="account-step-code" hidden><p class="muted">请输入 Telegram 官方服务对话或短信收到的验证码。请在 5 分钟内完成。</p><label>验证码<input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="20"></label></div>
+  <div id="account-step-password" hidden><p class="muted">此帐号开启了两步验证，请输入 Telegram 两步验证密码。</p><label>两步验证密码<input name="password" type="password" autocomplete="off" maxlength="256"></label></div>
+  <div class="modal-error form-error" role="alert"></div><div class="modal-actions"><button class="secondary close-modal" type="button">取消</button><button id="account-submit" class="primary" type="submit">发送验证码</button></div>
+</form></dialog>
+<div id="toast" class="toast" role="status" hidden></div>
+</body></html>

@@ -1,0 +1,4 @@
+# Replace with your domain. Point its DNS at your server and allow TCP 80/443.
+checkin.example.com {
+    reverse_proxy 127.0.0.1:8080
+}

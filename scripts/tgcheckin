@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+if [[ $EUID -ne 0 ]]; then exec sudo /usr/local/bin/tgcheckin "$@"; fi
+ROOT=/opt/tgcheckin/current
+export TGCHECKIN_DATA=/var/lib/tgcheckin
+cd "$ROOT/app"
+case "${1:-menu}" in
+  start|stop|restart) exec systemctl "$1" tgcheckin ;;
+  service-status) exec systemctl status tgcheckin --no-pager ;;
+  logs) exec journalctl -u tgcheckin -n 100 --no-pager ;;
+  update) exec bash "$ROOT/app/install.sh" ;;
+  backup)
+    install -d -m 700 -o tgcheckin -g tgcheckin /var/backups/tgcheckin
+    exec runuser -u tgcheckin -- "$ROOT/venv/bin/python" -m app.backup /var/backups/tgcheckin ;;
+  menu) exec "$ROOT/venv/bin/python" -m app.cli menu ;;
+  *) exec runuser -u tgcheckin -- "$ROOT/venv/bin/python" -m app.cli "$@" ;;
+esac
