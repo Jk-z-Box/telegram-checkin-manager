@@ -4,13 +4,46 @@ import re
 import secrets
 import time
 
-from telethon import TelegramClient, events, errors, utils
+from telethon import TelegramClient, events, errors, functions, types, utils
 from telethon.sessions import StringSession
 from telethon.tl.types import InlineButtonTypeCallback, ButtonTypeDefault
 
 
 class CheckinError(Exception):
     pass
+
+
+RETRY_DELAY = 2
+
+
+def send_policy(job):
+    """A retry count excludes the initial attempt; disabled tasks keep 90 seconds."""
+    if job.get("retry_enabled", False):
+        return job.get("send_timeout", 30), job.get("max_retries", 2)
+    return 90, 0
+
+
+def execution_timeout(job):
+    timeout, retries = send_policy(job)
+    return timeout * (retries + 1) + RETRY_DELAY * retries + job["reply_timeout"] + 15
+
+
+def transient_send_error(exc):
+    # Telethon classifies this as a ServerError, but retrying cannot recover its ID.
+    if isinstance(exc, errors.RandomIdDuplicateError):
+        return False
+    return isinstance(exc, (TimeoutError, ConnectionError, OSError, errors.ServerError,
+                            errors.RpcCallFailError, errors.TimedOutError))
+
+
+def sent_message_id(result, random_id):
+    if isinstance(result, types.UpdateShortSentMessage):
+        return result.id
+    updates = [result.update] if isinstance(result, types.UpdateShort) else getattr(result, "updates", [])
+    for update in updates:
+        if isinstance(update, types.UpdateMessageID) and update.random_id == random_id:
+            return update.id
+    return None
 
 
 class LoginFailure(CheckinError):
@@ -51,12 +84,12 @@ class TelegramService:
         return TelegramClient(
             StringSession(secret.get("session", "")), secret["api_id"], secret["api_hash"],
             # Telethon consumes an attempt when switching Telegram DCs. Login must
-            # be able to continue after PHONE/NETWORK/USER_MIGRATE. Keep task sends
-            # on zero RPC retries, since their delivery may already have succeeded.
+            # be able to continue after PHONE/NETWORK/USER_MIGRATE. Task retries
+            # are managed explicitly with a fixed random_id and per-task limits.
             flood_sleep_threshold=0, request_retries=3 if login else 0,
             raise_last_call_error=True, connection_retries=2,
             timeout=15, device_model="Checkin Manager", system_version="Linux",
-            app_version="1.2.1",
+            app_version="1.3.0",
         )
 
     async def prune(self):
@@ -176,66 +209,121 @@ class TelegramService:
         client = self.client(self.store.decrypt(account["secret"]))
         self.active.add(client)
         queue = asyncio.Queue(maxsize=100)
-        handler = None
+        peer_id = None
+        is_private = False
+        request = None
+        dispatched = False
+        uncertain = False
+        timeout, retries = send_policy(job)
+
+        async def receive(event):
+            # For groups, replies are further restricted to our command below.
+            if peer_id is not None and event.chat_id == peer_id and not event.out and not queue.full():
+                queue.put_nowait(event.message)
+
+        handler = receive
+        client.add_event_handler(handler, events.NewMessage())
+        client.add_event_handler(handler, events.MessageEdited())
         try:
-            await client.connect()
-            if not await client.is_user_authorized():
-                raise CheckinError("帐号会话失效，请重新登录")
-            target = await self.resolve(client, job["target"])
-            entity = await client.get_entity(target)
-            peer_id = utils.get_peer_id(entity)
-            is_private = hasattr(entity, "first_name")
-
-            async def receive(event):
-                # For groups, only messages replying to our command are eligible.
-                # Private dialogs are already restricted to the selected peer.
-                if event.chat_id == peer_id and not event.out and not queue.full():
-                    queue.put_nowait(event.message)
-
-            handler = receive
-            client.add_event_handler(handler, events.NewMessage())
-            client.add_event_handler(handler, events.MessageEdited())
-            sent = await client.send_message(target, job["message"], parse_mode=None)
-            if not job["button"] and not job["success_text"]:
-                return "sent", "签到消息已发送；未配置成功回复校验"
-            deadline = time.monotonic() + job["reply_timeout"]
-            clicked = not bool(job["button"])
-            button_id = None
-            while time.monotonic() < deadline:
+            for attempt in range(retries + 1):
+                prefix = f"发送尝试 {attempt + 1} 次（重试 {attempt} 次）；"
                 try:
-                    reply = await asyncio.wait_for(queue.get(), deadline - time.monotonic())
-                except asyncio.TimeoutError:
+                    # Only preparation and message submission share this timeout.
+                    # The reply deadline starts after a confirmed send response.
+                    async with asyncio.timeout(timeout):
+                        await client.connect()
+                        if request is None:
+                            if not await client.is_user_authorized():
+                                raise CheckinError("帐号会话失效，请重新登录")
+                            target = await self.resolve(client, job["target"])
+                            entity = await client.get_entity(target)
+                            peer_id = utils.get_peer_id(entity)
+                            is_private = hasattr(entity, "first_name")
+                            # Build once: every retry uses the same random_id, so
+                            # Telegram can deduplicate a send whose response was lost.
+                            # No formatting entities: preserve the original plain text.
+                            request = functions.messages.SendMessageRequest(peer=target, message=job["message"])
+                        dispatched = True
+                        result = await client(request)
+                    sent_id = sent_message_id(result, request.random_id)
+                    if sent_id is None:
+                        return "unknown", prefix + "Telegram 未返回可核对的消息 ID；请核实是否已发送，已停止重试"
                     break
-                if reply.id <= sent.id:
-                    continue
-                if not is_private and reply.reply_to_msg_id not in (sent.id, button_id):
-                    continue
-                if not clicked and reply.buttons:
-                    for row in reply.buttons:
-                        for button in row:
-                            if button.text == job["button"]:
-                                # Never follow URLs, share contact/location, or open auth flows.
-                                if not isinstance(button.button.type, (InlineButtonTypeCallback, ButtonTypeDefault)):
-                                    raise CheckinError("匹配按钮不是普通文本或回调按钮，已拒绝点击")
-                                await button.click()
-                                clicked, button_id = True, reply.id
-                                break
-                        if clicked:
-                            break
-                    if clicked and not job["success_text"]:
-                        return "sent", "消息已发送并点击按钮；未配置成功回复校验"
-                    if clicked:
-                        # Only a subsequent event can confirm the click outcome.
-                        continue
-                if clicked and job["success_text"] and job["success_text"] in (reply.raw_text or ""):
-                    return "confirmed", "收到包含指定成功文本的回复"
-            return "unconfirmed", ("消息已发送，但等待回复超时；请在 Telegram 核实。"
-                                    "不会自动重发以避免重复签到")
+                except errors.FloodWaitError as exc:
+                    # Runner persists cooldown; do not retry Telegram rate limits.
+                    exc.checkin_status = "unknown" if uncertain else "failed"
+                    exc.checkin_detail = prefix + ("此前发送结果未知；请在 Telegram 核实；" if uncertain else "")
+                    raise
+                except Exception as exc:
+                    transient = transient_send_error(exc)
+                    rejected = isinstance(exc, errors.RPCError) and exc.code in (400, 401, 403, 406, 420)
+                    uncertain = uncertain or (dispatched and not rejected) or isinstance(exc, errors.RandomIdDuplicateError)
+                    if not transient or attempt == retries:
+                        reason = (f"发送阶段超过 {timeout} 秒" if isinstance(exc, TimeoutError)
+                                  else friendly_error(exc))
+                        end = ("已达到最多重试次数" if transient and retries else
+                               "未开启失败后重试" if transient else "此错误不自动重试")
+                        status = "unknown" if uncertain else "failed"
+                        detail = "；请在 Telegram 核实是否已发送" if uncertain else "；消息未发送"
+                        return status, prefix + reason + "；" + end + detail
+                    await asyncio.sleep(RETRY_DELAY)
+
+            if not job["button"] and not job["success_text"]:
+                return "sent", prefix + "签到消息已发送；未配置成功回复校验"
+            try:
+                async with asyncio.timeout(job["reply_timeout"]):
+                    status, detail = await self.wait_reply(job, queue, sent_id, is_private)
+                return status, prefix + detail
+            except TimeoutError:
+                return "unconfirmed", prefix + "消息已发送，但等待回复超时；不会触发发送重试"
+            except errors.FloodWaitError as exc:
+                exc.checkin_status = "unconfirmed"
+                exc.checkin_detail = prefix + "消息已发送，但处理回复时触发限流；不会触发发送重试；"
+                raise
+            except Exception as exc:
+                return "unconfirmed", prefix + "消息已发送，但处理回复失败：" + friendly_error(exc) + "；不会触发发送重试"
         finally:
-            if handler:
-                client.remove_event_handler(handler)
+            client.remove_event_handler(handler)
             self.active.discard(client)
-            await client.disconnect()
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=3)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Telegram send cleanup failed error_type=%s", type(exc).__name__)
+
+    async def wait_reply(self, job, queue, sent_id, is_private):
+        deadline = time.monotonic() + job["reply_timeout"]
+        clicked = not bool(job["button"])
+        button_id = None
+        while time.monotonic() < deadline:
+            try:
+                reply = await asyncio.wait_for(queue.get(), deadline - time.monotonic())
+            except asyncio.TimeoutError:
+                break
+            if reply.id <= sent_id:
+                continue
+            if not is_private and reply.reply_to_msg_id not in (sent_id, button_id):
+                continue
+            if not clicked and reply.buttons:
+                for row in reply.buttons:
+                    for button in row:
+                        if button.text == job["button"]:
+                            # Never follow URLs, share contact/location, or open auth flows.
+                            if not isinstance(button.button.type, (InlineButtonTypeCallback, ButtonTypeDefault)):
+                                raise CheckinError("匹配按钮不是普通文本或回调按钮，已拒绝点击")
+                            await button.click()
+                            clicked, button_id = True, reply.id
+                            break
+                    if clicked:
+                        break
+                if clicked and not job["success_text"]:
+                    return "sent", "消息已发送并点击按钮；未配置成功回复校验"
+                if clicked:
+                    # Only a subsequent event can confirm the click outcome.
+                    continue
+            if clicked and job["success_text"] and job["success_text"] in (reply.raw_text or ""):
+                return "confirmed", "收到包含指定成功文本的回复"
+        return "unconfirmed", ("消息已发送，但等待回复超时；请在 Telegram 核实。"
+                                "不会自动重发以避免重复签到")
 
     async def close(self):
         clients = set(self.active) | {item["client"] for item in self.pending.values()}
@@ -288,6 +376,14 @@ def friendly_error(exc, *, login=False):
         return f"登录请求未完成（{type(exc).__name__}）：{login_error_message(exc)}"
     if isinstance(exc, errors.FloodWaitError):
         return f"Telegram 要求等待 {exc.seconds} 秒；已暂停该帐号至冷却结束"
+    if isinstance(exc, errors.RandomIdDuplicateError):
+        return "Telegram 检测到相同消息标识，已停止重试；请核实原消息"
+    if isinstance(exc, (errors.ServerError, errors.RpcCallFailError)):
+        return f"Telegram 暂时未完成请求（{type(exc).__name__}）"
+    if isinstance(exc, (TimeoutError, errors.TimedOutError)):
+        return "等待 Telegram 响应超时"
+    if isinstance(exc, (ConnectionError, OSError)):
+        return f"连接 Telegram 失败（{type(exc).__name__}），请检查服务器网络"
     mapping = {
         "PhoneCodeInvalidError": "验证码错误，请重新输入",
         "PhoneCodeExpiredError": "验证码已过期，请重新获取",
@@ -298,6 +394,7 @@ def friendly_error(exc, *, login=False):
         "SessionRevokedError": "帐号会话已撤销，请重新登录",
         "ChatWriteForbiddenError": "当前帐号没有向此对话发送消息的权限",
         "UserDeactivatedBanError": "Telegram 帐号已被限制",
+        "SlowModeWaitError": "此对话触发 Telegram 慢速模式，请等待后再执行",
     }
     # Raw Telegram exceptions can contain phone numbers or API request details.
     return mapping.get(type(exc).__name__, "请求未完成（%s），请检查网络、帐号及目标对话" % type(exc).__name__)

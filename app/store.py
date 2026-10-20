@@ -96,6 +96,10 @@ class Store:
         # Existing installations keep their single-account tasks unchanged.
         if "group_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}:
             self.db.execute("ALTER TABLE jobs ADD COLUMN group_id INTEGER REFERENCES job_groups(id) ON DELETE CASCADE")
+        columns = {row["name"] for row in self.db.execute("PRAGMA table_info(jobs)")}
+        for name, default in (("retry_enabled", 0), ("send_timeout", 30), ("max_retries", 2)):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {name} INTEGER NOT NULL DEFAULT {default}")
         self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS jobs_group_account ON jobs(group_id,account_id)")
         self.db.commit()
 

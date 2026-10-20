@@ -4,7 +4,7 @@ import time
 from telethon.errors import FloodWaitError
 
 from .models import next_time
-from .telegram import friendly_error
+from .telegram import execution_timeout, friendly_error
 
 
 class Runner:
@@ -52,14 +52,15 @@ class Runner:
                 else:
                     try:
                         status, detail = await asyncio.wait_for(
-                            self.telegram.send(account, current), timeout=current["reply_timeout"] + 90)
+                            self.telegram.send(account, current), timeout=execution_timeout(current))
                     finally:
                         # Serialize each account and leave a small gap between messages.
                         await asyncio.sleep(2)
         except FloodWaitError as exc:
             self.store.execute("UPDATE accounts SET cooldown=? WHERE id=?",
                                (time.time() + exc.seconds + 1, job["account_id"]))
-            detail = friendly_error(exc)
+            status = getattr(exc, "checkin_status", "failed")
+            detail = getattr(exc, "checkin_detail", "") + friendly_error(exc)
         except asyncio.CancelledError:
             status, detail = "unknown", "服务停止，结果可能已发送；请核实 Telegram"
             raise

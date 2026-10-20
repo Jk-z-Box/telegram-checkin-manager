@@ -1,7 +1,9 @@
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from datetime import datetime, timezone
 
+from telethon import functions, types
 from telethon.tl.types import KeyboardInlineButton, InlineButtonTypeCallback, InlineButtonTypeUrl
 
 from app.telegram import CheckinError, TelegramService
@@ -12,6 +14,8 @@ class Client:
         self.replies = replies
         self.handlers = []
         self.private = private
+        self.requests = []
+        self.reply_delay = .001
         self.connect = AsyncMock()
         self.disconnect = AsyncMock()
         self.is_user_authorized = AsyncMock(return_value=True)
@@ -27,16 +31,19 @@ class Client:
     def remove_event_handler(self, handler):
         self.handlers.remove(handler)
 
-    async def send_message(self, target, message, parse_mode):
-        assert parse_mode is None
+    async def __call__(self, request):
+        assert isinstance(request, functions.messages.SendMessageRequest)
+        assert request.entities is None
+        self.requests.append(request)
         async def emit():
             for reply in self.replies:
-                await asyncio.sleep(.001)
+                await asyncio.sleep(self.reply_delay)
                 event = SimpleNamespace(chat_id=44 if self.private else -44,out=False,message=reply)
                 for handler in self.handlers[:]:
                     await handler(event)
         asyncio.create_task(emit())
-        return SimpleNamespace(id=100)
+        return types.UpdateShortSentMessage(id=100, pts=1, pts_count=1,
+                                           date=datetime.now(timezone.utc), out=True)
 
 
 def reply(text="",buttons=None,reply_to=100):
@@ -78,10 +85,7 @@ def test_callback_then_confirmation():
 def test_does_not_open_url_button():
     button = SimpleNamespace(text="签到",button=KeyboardInlineButton(text="签到",type=InlineButtonTypeUrl(url="https://example.com")),click=AsyncMock())
     service,client,job = execute([reply(buttons=[[button]])],button="签到")
-    try:
-        asyncio.run(service.send({"secret":""},job))
-        assert False, "URL button should be refused"
-    except CheckinError:
-        pass
+    status, detail = asyncio.run(service.send({"secret":""},job))
+    assert status == "unconfirmed" and "已拒绝点击" in detail
     assert button.click.await_count == 0
     assert client.disconnect.await_count == 1

@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light">
   <title>签到工作台 · Telegram Check-in</title>
   <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/static/style.css?v=1.2.1">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="/static/style.css?v=1.3.0">
+  <script src="/static/app.js?v=1.3.0" defer></script>
 </head>
 <body>
 <section id="login-view" class="login-view">
@@ -91,6 +91,14 @@
   <label>签到消息<textarea name="message" required maxlength="4096" rows="3" placeholder="/checkin"></textarea></label>
   <div class="form-grid"><label>Cron 计划<input name="cron" required value="0 9 * * *" placeholder="0 9 * * *"></label><label>时区<input name="timezone" required value="Asia/Shanghai" placeholder="Asia/Shanghai"></label></div>
   <p class="field-help">五段格式：分 时 日 月 星期；星期 0=周一、6=周日，可写 mon–sun。默认每天 09:00。</p>
+  <fieldset class="retry-settings"><legend>发送重试</legend>
+    <label class="checkbox"><input id="retry-enabled" name="retry_enabled" type="checkbox" aria-controls="retry-options">失败后重试</label>
+    <div id="retry-options" hidden>
+      <div class="form-grid"><label>发送超时（秒）<input name="send_timeout" type="number" min="5" max="300" step="1" value="30" required></label><label>最多重试次数<input name="max_retries" type="number" min="1" max="10" step="1" value="2" required></label></div>
+      <p class="picker-help">每次发送超过设定秒数，或出现网络 / Telegram 临时错误时重试。次数不含首次发送，例如重试 2 次表示最多尝试 3 次。</p>
+    </div>
+    <p class="picker-help">仅针对消息发送。等待回复超时、按钮处理失败不会重发；限流、权限或会话错误不重试。</p>
+  </fieldset>
   <details><summary>按钮与回复校验（可选）</summary><label>要点击的按钮文字<input name="button" maxlength="100" placeholder="例如：签到（完全匹配）"></label><label>成功回复包含的文本<input name="success_text" maxlength="200" placeholder="例如：签到成功"></label><label>等待回复超时（秒）<input name="reply_timeout" type="number" min="5" max="120" value="30"></label><p class="field-help">只点击文本 / 回调按钮，不打开外部链接。群组中只接受回复本次签到消息的结果；验证码和多步交互需要手动处理。</p></details>
   <label class="checkbox"><input name="enabled" type="checkbox" checked>保存后启用任务</label><div class="modal-error form-error" role="alert"></div><div class="modal-actions"><button class="secondary close-modal" type="button">取消</button><button id="job-submit" class="primary" type="submit">保存任务</button></div>
 </form></dialog>

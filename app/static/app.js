@@ -178,6 +178,7 @@ function openJob(job) {
   form.elements.namedItem("group_id").value = job?.group_id || "";
   if(!singleEdit) syncJobAccounts();
   else $("#job-submit").textContent = "保存任务";
+  syncRetryOptions();
   $("#dialog-options").hidden = true;
   form.querySelector(".modal-error").textContent = "";
   $("#job-dialog").showModal();
@@ -188,6 +189,9 @@ $("#job-form").onsubmit = e => {e.preventDefault();busy(e.target,async () => {
   const data = Object.fromEntries(new FormData(e.target)), id = data.id, groupId = data.group_id;
   delete data.id;delete data.group_id;
   data.reply_timeout = Number(data.reply_timeout);data.enabled = e.target.elements.enabled.checked;
+  data.retry_enabled = e.target.elements.retry_enabled.checked;
+  data.send_timeout = Number(e.target.elements.send_timeout.value);
+  data.max_retries = Number(e.target.elements.max_retries.value);
   let message = "任务已保存";
   if(id) {data.account_id = Number(data.account_id);await api(`/jobs/${id}`,"PUT",data);}
   else {
@@ -209,6 +213,12 @@ $("#job-form").onsubmit = e => {e.preventDefault();busy(e.target,async () => {
 function selectedJobAccounts() {
   return [...document.querySelectorAll("#job-accounts input:checked")].map(input=>Number(input.value));
 }
+function syncRetryOptions() {
+  const enabled = $("#retry-enabled").checked;
+  $("#retry-options").hidden = !enabled;
+  $("#retry-options").querySelectorAll("input").forEach(input=>input.disabled=!enabled);
+}
+$("#retry-enabled").onchange = syncRetryOptions;
 function syncJobAccounts() {
   const selected = selectedJobAccounts(), source = $("#job-account").value;
   $("#selected-account-count").textContent = `已选 ${selected.length} 个`;

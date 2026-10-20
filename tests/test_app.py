@@ -192,6 +192,23 @@ def test_restart_marks_inflight_unknown(tmp_path):
         assert "不会自动重发" in result["detail"]
 
 
+def test_single_task_retry_config_round_trip_and_disable(client):
+    login(client)
+    _, job_id, data = seed(client)
+    assert client.get("/api/jobs").json()[0]["retry_enabled"] == 0
+    data.update(retry_enabled=True, send_timeout=45, max_retries=3)
+    assert client.put(f"/api/jobs/{job_id}", json=data).status_code == 200
+    saved = client.get("/api/jobs").json()[0]
+    assert (saved["retry_enabled"], saved["send_timeout"], saved["max_retries"]) == (1, 45, 3)
+    # A second connection proves persistence, rather than relying on in-memory state.
+    db = Store(client.app.state.store.path)
+    assert db.one("SELECT * FROM jobs WHERE id=?", (job_id,))["send_timeout"] == 45
+    db.close()
+    data["retry_enabled"] = False
+    assert client.put(f"/api/jobs/{job_id}", json=data).status_code == 200
+    assert client.get("/api/jobs").json()[0]["retry_enabled"] == 0
+
+
 def test_backup_restores_encrypted_session(client,tmp_path,monkeypatch):
     from app.backup import backup
     import tarfile

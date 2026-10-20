@@ -57,6 +57,9 @@ class JobFields(BaseModel):
     button: str = Field(default="", max_length=100)
     success_text: str = Field(default="", max_length=200)
     reply_timeout: int = Field(default=30, ge=5, le=120)
+    retry_enabled: bool = False
+    send_timeout: int = Field(default=30, ge=5, le=300, strict=True)
+    max_retries: int = Field(default=2, ge=1, le=10, strict=True)
     enabled: bool = True
 
     @field_validator("name", "target", "message")

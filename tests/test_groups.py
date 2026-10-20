@@ -161,6 +161,8 @@ def test_pre_group_database_migrates_without_changing_existing_tasks(tmp_path):
     initialize(tmp_path, "admin", PASSWORD)
     raw = sqlite3.connect(tmp_path / "checkin.db")
     raw.executescript("DROP INDEX jobs_group_account; ALTER TABLE jobs DROP COLUMN group_id; DROP TABLE job_groups;")
+    for column in ("retry_enabled", "send_timeout", "max_retries"):
+        raw.execute(f"ALTER TABLE jobs DROP COLUMN {column}")
     raw.execute("INSERT INTO accounts(id,name,uid,secret,created) VALUES(1,'legacy',1,'encrypted',0)")
     raw.execute("""INSERT INTO jobs(account_id,name,target,message,cron,timezone,next_run,created)
                    VALUES(1,'legacy job','@example_bot','/checkin','0 9 * * *','Asia/Shanghai',123,0)""")
@@ -172,6 +174,28 @@ def test_pre_group_database_migrates_without_changing_existing_tasks(tmp_path):
         migrated = db.one("SELECT * FROM jobs")
         assert (migrated["id"], migrated["name"], migrated["next_run"]) == original
         assert migrated["group_id"] is None
+        assert (migrated["retry_enabled"], migrated["send_timeout"], migrated["max_retries"]) == (0, 30, 2)
         assert db.db.execute("PRAGMA foreign_key_check").fetchall() == []
     finally:
         db.close()
+
+
+def test_collection_retry_config_applies_to_retained_and_new_members(client):
+    group = create(client, retry_enabled=True, send_timeout=25, max_retries=4)
+    assert all((j["retry_enabled"], j["send_timeout"], j["max_retries"]) == (1, 25, 4)
+               for j in client.get("/api/jobs").json())
+    response = client.put(f"/api/job-groups/{group['group_id']}", json=payload(
+        account_ids=[2, 3, 4], retry_enabled=True, send_timeout=40, max_retries=2))
+    assert response.status_code == 200
+    assert all((j["retry_enabled"], j["send_timeout"], j["max_retries"]) == (1, 40, 2)
+               for j in client.get("/api/jobs").json())
+
+
+@pytest.mark.parametrize("settings", [
+    {"send_timeout": 4}, {"send_timeout": 301}, {"send_timeout": 5.5},
+    {"max_retries": 0}, {"max_retries": 11}, {"max_retries": True},
+])
+def test_invalid_retry_settings_do_not_create_collection(client, settings):
+    response = client.post("/api/jobs/batch", json=payload(retry_enabled=True, **settings))
+    assert response.status_code == 422
+    assert client.get("/api/jobs").json() == []
