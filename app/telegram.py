@@ -3,6 +3,7 @@ import logging
 import re
 import secrets
 import time
+from contextlib import asynccontextmanager
 
 from telethon import TelegramClient, events, errors, functions, types, utils
 from telethon.sessions import StringSession
@@ -79,6 +80,8 @@ class TelegramService:
         self.pending = {}
         self.locks = {}
         self.active = set()
+        self.clients = {}
+        self.reply_windows = {}
 
     def client(self, secret, *, login=False):
         return TelegramClient(
@@ -89,10 +92,17 @@ class TelegramService:
             flood_sleep_threshold=0, request_retries=3 if login else 0,
             raise_last_call_error=True, connection_retries=2,
             timeout=15, device_model="Checkin Manager", system_version="Linux",
-            app_version="1.3.1",
+            app_version="1.4.0",
         )
 
     async def prune(self):
+        now = time.monotonic()
+        for key, windows in list(self.reply_windows.items()):
+            remaining = [window for window in windows if window["expires"] > now]
+            if remaining:
+                self.reply_windows[key] = remaining
+            else:
+                self.reply_windows.pop(key, None)
         for ticket, item in list(self.pending.items()):
             if item["expires"] < time.time() and not item["busy"]:
                 self.pending.pop(ticket, None)
@@ -180,19 +190,47 @@ class TelegramService:
     def lock(self, account_id):
         return self.locks.setdefault(account_id, asyncio.Lock())
 
+    @asynccontextmanager
+    async def account_client(self, account):
+        # Concurrent reply watchers for an account must share one update stream.
+        # Include the encrypted credential so a renewed session gets a fresh client.
+        key = (account.get("id"), account["secret"])
+        entry = self.clients.get(key)
+        if entry is None:
+            client = self.client(self.store.decrypt(account["secret"]))
+            entry = self.clients[key] = {"client": client, "users": 0}
+            self.active.add(client)
+        entry["users"] += 1
+        try:
+            yield entry["client"]
+        finally:
+            entry["users"] -= 1
+            if entry["users"] == 0:
+                self.clients.pop(key, None)
+                self.active.discard(entry["client"])
+                try:
+                    await asyncio.wait_for(entry["client"].disconnect(), timeout=3)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Telegram client cleanup failed error_type=%s",
+                                                        type(exc).__name__)
+
+    def begin_reply_window(self, account, peer_id):
+        key = (account.get("id", account["secret"]), peer_id)
+        windows = [w for w in self.reply_windows.get(key, []) if w["expires"] > time.monotonic()]
+        window = {"expires": float("inf"), "ambiguous": bool(windows)}
+        for previous in windows:
+            previous["ambiguous"] = True
+        self.reply_windows[key] = [*windows, window]
+        return window
+
     async def dialogs(self, account):
         async with self.lock(account["id"]):
-            client = self.client(self.store.decrypt(account["secret"]))
-            self.active.add(client)
-            try:
+            async with self.account_client(account) as client:
                 await client.connect()
                 if not await client.is_user_authorized():
                     raise CheckinError("帐号会话失效，请重新登录")
                 return [{"id": str(d.id), "name": d.name or str(d.id)}
                         async for d in client.iter_dialogs(limit=150)]
-            finally:
-                self.active.discard(client)
-                await client.disconnect()
 
     async def resolve(self, client, target):
         if target.lstrip("-").isdigit():
@@ -205,15 +243,18 @@ class TelegramService:
             raise CheckinError("未找到此对话 ID；请确认帐号已加入，并从对话列表选择")
         return await client.get_input_entity(target)
 
-    async def send(self, account, job):
-        client = self.client(self.store.decrypt(account["secret"]))
-        self.active.add(client)
+    async def send(self, account, job, *, on_sent=None):
+        async with self.account_client(account) as client:
+            return await self.send_and_watch(client, account, job, on_sent)
+
+    async def send_and_watch(self, client, account, job, on_sent):
         queue = asyncio.Queue(maxsize=100)
         peer_id = None
         is_private = False
         request = None
         dispatched = False
         uncertain = False
+        window = None
         timeout, retries = send_policy(job)
 
         async def receive(event):
@@ -251,12 +292,14 @@ class TelegramService:
                             # Telegram can deduplicate a send whose response was lost.
                             # No formatting entities: preserve the original plain text.
                             request = functions.messages.SendMessageRequest(peer=target, message=job["message"])
+                            window = self.begin_reply_window(account, peer_id)
                         stage = "提交签到消息"
                         dispatched = True
                         result = await client(request)
                     sent_id = sent_message_id(result, request.random_id)
                     if sent_id is None:
                         return "unknown", prefix + "Telegram 未返回可核对的消息 ID；请核实是否已发送，已停止重试"
+                    window["expires"] = time.monotonic() + job["reply_timeout"]
                     break
                 except errors.FloodWaitError as exc:
                     # Runner persists cooldown; do not retry Telegram rate limits.
@@ -277,14 +320,18 @@ class TelegramService:
                         return status, prefix + stage + "失败：" + reason + "；" + end + detail
                     await asyncio.sleep(RETRY_DELAY)
 
+            if on_sent is not None:
+                # Synchronous notification: record acknowledgement and release the
+                # send queue without consuming any of the independent reply budget.
+                on_sent(prefix)
             if not job["button"] and not job["success_text"]:
                 return "sent", prefix + "签到消息已发送；未配置成功回复校验"
             try:
                 async with asyncio.timeout(job["reply_timeout"]):
-                    status, detail = await self.wait_reply(job, queue, sent_id, is_private)
+                    status, detail = await self.wait_reply(job, queue, sent_id, is_private, window)
                 return status, prefix + detail
             except TimeoutError:
-                return "unconfirmed", prefix + "消息已发送，但等待回复超时；不会触发发送重试"
+                return "reply_timeout", prefix + self.reply_timeout_detail(window)
             except errors.FloodWaitError as exc:
                 exc.checkin_status = "unconfirmed"
                 exc.checkin_detail = prefix + "消息已发送，但处理回复时触发限流；不会触发发送重试；"
@@ -293,13 +340,19 @@ class TelegramService:
                 return "unconfirmed", prefix + "消息已发送，但处理回复失败：" + friendly_error(exc) + "；不会触发发送重试"
         finally:
             client.remove_event_handler(handler)
-            self.active.discard(client)
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=3)
-            except Exception as exc:
-                logging.getLogger(__name__).warning("Telegram send cleanup failed error_type=%s", type(exc).__name__)
+            if window is not None and window["expires"] == float("inf"):
+                # Keep an uncertain send's window briefly: a late unthreaded reply
+                # must not confirm a later command after a timeout or cancellation.
+                window["expires"] = time.monotonic() + job["reply_timeout"]
 
-    async def wait_reply(self, job, queue, sent_id, is_private):
+    @staticmethod
+    def reply_timeout_detail(window):
+        detail = "消息已发送，但等待回复超时；不会触发发送重试"
+        if window["ambiguous"]:
+            detail += "；同一帐号同一对话有连续任务，未引用原消息的回复无法可靠归属，未用作确认"
+        return detail
+
+    async def wait_reply(self, job, queue, sent_id, is_private, window):
         deadline = time.monotonic() + job["reply_timeout"]
         clicked = not bool(job["button"])
         button_id = None
@@ -310,8 +363,13 @@ class TelegramService:
                 break
             if reply.id <= sent_id:
                 continue
-            if not is_private and reply.reply_to_msg_id not in (sent_id, button_id):
-                continue
+            reference = reply.reply_to_msg_id
+            if reply.id != button_id:
+                if reference is not None:
+                    if reference not in (sent_id, button_id):
+                        continue
+                elif not is_private or window["ambiguous"]:
+                    continue
             if not clicked and reply.buttons:
                 for row in reply.buttons:
                     for button in row:
@@ -331,13 +389,13 @@ class TelegramService:
                     continue
             if clicked and job["success_text"] and job["success_text"] in (reply.raw_text or ""):
                 return "confirmed", "收到包含指定成功文本的回复"
-        return "unconfirmed", ("消息已发送，但等待回复超时；请在 Telegram 核实。"
-                                "不会自动重发以避免重复签到")
+        return "reply_timeout", self.reply_timeout_detail(window)
 
     async def close(self):
         clients = set(self.active) | {item["client"] for item in self.pending.values()}
         await asyncio.gather(*(c.disconnect() for c in clients), return_exceptions=True)
         self.pending.clear()
+        self.reply_windows.clear()
 
 
 def login_error_message(exc):

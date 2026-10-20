@@ -111,7 +111,7 @@ def test_timeout_then_send_success_then_reply_timeout_never_sends_again():
     service, client, job = scenario(["hang", "ok"])
     job["success_text"] = "签到成功"
     status, detail = asyncio.run(service.send({"secret": ""}, job))
-    assert status == "unconfirmed" and "消息已发送" in detail
+    assert status == "reply_timeout" and "消息已发送" in detail
     assert len(client.attempts) == 2
 
 
@@ -135,7 +135,7 @@ def test_button_failure_or_timeout_does_not_resend_command(outcome):
     service, client, job = execute([reply(buttons=[[button]])], button="签到")
     job.update(retry_enabled=True, send_timeout=.01, max_retries=2)
     status, detail = asyncio.run(service.send({"secret": ""}, job))
-    assert status == "unconfirmed" and "消息已发送" in detail
+    assert status == ("reply_timeout" if outcome == "hang" else "unconfirmed") and "消息已发送" in detail
     assert len(client.requests) == 1 and button.click.await_count == 1
 
 

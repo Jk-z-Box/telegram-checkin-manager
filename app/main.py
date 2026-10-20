@@ -278,7 +278,9 @@ def create_app(path=None, service_factory=TelegramService, scheduler=True):
     @app.delete("/api/accounts/{account_id}")
     async def account_delete(account_id: int, request: Request, session=Depends(auth), db=Depends(store)):
         require_account(db, account_id)
-        if request.app.state.telegram.lock(account_id).locked():
+        if (request.app.state.telegram.lock(account_id).locked() or
+                any(job["id"] in request.app.state.runner.tasks
+                    for job in db.all("SELECT id FROM jobs WHERE account_id=?", (account_id,)))):
             raise HTTPException(409, "帐号正在执行请求，请完成后删除")
         db.execute("DELETE FROM accounts WHERE id=?", (account_id,))
         db.prune_groups()

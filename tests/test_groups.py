@@ -13,7 +13,9 @@ PASSWORD = "test-only-group-password"
 
 
 class FakeTelegram(TelegramService):
-    async def send(self, account, job):
+    async def send(self, account, job, *, on_sent=None):
+        if on_sent:
+            on_sent("mock send；")
         return "confirmed", "模拟签到成功"
 
 

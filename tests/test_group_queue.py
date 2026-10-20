@@ -22,7 +22,7 @@ class GatedTelegram(TelegramService):
         self.concurrent = 0
         self.peak = 0
 
-    async def send(self, account, job):
+    async def send(self, account, job, *, on_sent=None):
         ident = job["id"]
         self.concurrent += 1
         self.peak = max(self.peak, self.concurrent)
@@ -34,6 +34,8 @@ class GatedTelegram(TelegramService):
             outcome = self.outcomes.get(ident, ("confirmed", "mock reply"))
             if isinstance(outcome, Exception):
                 raise outcome
+            if on_sent:
+                on_sent("mock send；")
             return outcome
         finally:
             self.finishes[ident] = time.monotonic()
@@ -141,18 +143,19 @@ def test_one_member_failure_does_not_stop_remaining_members(setup, outcome):
     asyncio.run(run())
 
 
-def test_unrelated_collections_can_progress_independently(setup):
+def test_independent_task_and_collections_share_one_fifo(setup):
     async def run():
+        setup.execute("UPDATE jobs SET group_id=NULL WHERE id=4")
         service = GatedTelegram(setup)
         runner = Runner(setup, service)
-        for ident in (1, 4):
+        for ident in (1, 4, 2):
             runner.launch(setup.one("SELECT * FROM jobs WHERE id=?", (ident,)), "manual")
-        await entered(service, 1)
-        await entered(service, 4)
-        assert service.peak == 2
-        for event in service.release.values():
-            event.set()
+        for ident in (1, 4, 2):
+            await entered(service, ident)
+            assert service.calls[-1] == ident
+            service.release[ident].set()
         await asyncio.gather(*list(runner.tasks.values()))
+        assert service.calls == [1, 4, 2] and service.peak == 1
         await runner.close()
     asyncio.run(run())
 
@@ -184,18 +187,20 @@ def test_shutdown_distinguishes_queued_from_inflight_and_releases_locks(setup):
         await asyncio.wait_for(runner.close(), 2)
         assert service.calls == [1]
         assert [r["status"] for r in setup.all("SELECT status FROM runs ORDER BY id")] == ["unknown", "skipped", "skipped"]
-        assert not runner.group_locks[1].locked() and not service.lock(1).locked()
+        assert not runner.send_lock.locked() and not service.lock(1).locked()
     asyncio.run(run())
 
 
 def test_restart_does_not_mark_unsent_queue_as_delivery_unknown(setup):
     async def run():
-        for status in ("queued", "running"):
+        for status in ("queued", "running", "awaiting_reply"):
             setup.execute("INSERT INTO runs(job_name,account_name,started,status,source) VALUES(?,?,?,?,?)",
                           ("mock", "mock", time.time(), status, "manual"))
         setup.execute("UPDATE jobs SET enabled=0")
         runner = Runner(setup, GatedTelegram(setup))
         runner.start()
-        assert [r["status"] for r in setup.all("SELECT status FROM runs ORDER BY id")] == ["skipped", "unknown"]
+        assert [r["status"] for r in setup.all("SELECT status FROM runs ORDER BY id")] == [
+            "skipped", "unknown", "unconfirmed"]
+        assert "消息已发送" in setup.one("SELECT detail FROM runs WHERE status='unconfirmed'")["detail"]
         await runner.close()
     asyncio.run(run())

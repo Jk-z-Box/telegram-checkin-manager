@@ -130,7 +130,7 @@ class Store:
     def cleanup(self):
         self.prune_groups()
         self.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
-        self.execute("DELETE FROM runs WHERE started < ? AND status NOT IN ('running','queued')",
+        self.execute("DELETE FROM runs WHERE started < ? AND status NOT IN ('running','queued','awaiting_reply')",
                      (time.time() - 90 * 86400,))
 
     def prune_groups(self):

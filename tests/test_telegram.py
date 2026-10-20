@@ -69,7 +69,7 @@ def test_send_only_does_not_claim_confirmation():
 
 def test_group_ignores_unrelated_success():
     service,client,job = execute([reply("签到成功",reply_to=99)],success="签到成功",private=False)
-    assert asyncio.run(service.send({"secret":""},job))[0] == "unconfirmed"
+    assert asyncio.run(service.send({"secret":""},job))[0] == "reply_timeout"
 
 
 def test_matching_reply_confirms():

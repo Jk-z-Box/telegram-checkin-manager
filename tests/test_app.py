@@ -20,10 +20,12 @@ class FakeTelegram(TelegramService):
     calls = 0
     error = None
 
-    async def send(self, account, job):
+    async def send(self, account, job, *, on_sent=None):
         self.calls += 1
         if self.error:
             raise self.error
+        if on_sent:
+            on_sent("mock send；")
         await asyncio.sleep(0.05)
         return "confirmed", "模拟回复匹配"
 
@@ -127,7 +129,7 @@ def test_manual_execution_no_duplicate_and_result(client):
     assert client.delete(f"/api/jobs/{job_id}").status_code == 409
     for _ in range(50):
         run = client.get("/api/runs").json()[0]
-        if run["status"] != "running":
+        if run["status"] not in ("queued", "running", "awaiting_reply", "sent"):
             break
         time.sleep(.1)
     assert run["status"] == "confirmed"
@@ -141,13 +143,39 @@ def test_floodwait_persists_account_cooldown(client):
     assert client.post(f"/api/jobs/{job_id}/run").status_code == 200
     for _ in range(50):
         run = client.get("/api/runs").json()[0]
-        if run["status"] != "running":
+        if run["status"] not in ("queued", "running", "awaiting_reply", "sent"):
             break
         time.sleep(.1)
     assert run["status"] == "failed"
     account = client.app.state.store.one("SELECT * FROM accounts WHERE id=?", (account_id,))
     assert account["cooldown"] > time.time()+50
     assert client.post(f"/api/jobs/{job_id}/run").status_code == 429
+
+
+def test_awaiting_reply_still_guards_account_and_task_mutations(client, monkeypatch):
+    monkeypatch.setattr("app.runner.ACCOUNT_GAP", .01)
+    login(client)
+    account_id, job_id, data = seed(client)
+    assert client.put(f"/api/jobs/{job_id}", json={**data, "success_text": "ok"}).status_code == 200
+
+    async def delayed_reply(account, job, *, on_sent=None):
+        on_sent("mock；")
+        await asyncio.sleep(60)
+        return "confirmed", "mock"
+
+    client.app.state.telegram.send = delayed_reply
+    assert client.post(f"/api/jobs/{job_id}/run").status_code == 200
+    for _ in range(100):
+        run = client.get("/api/runs").json()[0]
+        unlocked = not client.app.state.telegram.lock(account_id).locked()
+        if run["status"] == "awaiting_reply" and unlocked:
+            break
+        time.sleep(.01)
+    assert run["status"] == "awaiting_reply" and unlocked and run["finished"] is None
+    assert client.delete(f"/api/accounts/{account_id}").status_code == 409
+    assert client.delete(f"/api/jobs/{job_id}").status_code == 409
+    assert client.put(f"/api/jobs/{job_id}", json=data).status_code == 409
+    assert client.post(f"/api/jobs/{job_id}/run").status_code in (409, 429)
 
 
 def test_scheduler_pause_misfire_and_claim(client):
